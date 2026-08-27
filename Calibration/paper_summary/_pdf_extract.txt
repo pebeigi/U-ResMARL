@@ -1,0 +1,769 @@
+pages=14
+
+===== PAGE 1 =====
+Decentralized Spatial Negotiation via Residual
+Utility Learning: Residual Multi-Agent Policies
+over Behavioral Priors, utility-guided residual
+multi-agent reinforcement learning framework for
+trajectory generation
+Pedram Beigi
+The George Washington University
+Washington, DC, USA
+Samer Hamdar
+The George Washington University
+Washington, DC, USA
+Abstract—Traffic in many developing regions operates under
+weak lane discipline, heterogeneous vehicle interactions, and
+decentralized negotiation of shared space. These environments
+challenge conventional lane-based trajectory prediction and mo-
+tion planning frameworks, which typically rely on structured
+map priors and predefined leader–follower relationships. This pa-
+per presents a utility-guided residual multi-agent reinforcement
+learning framework for motion modeling in weakly structured
+non-lane-based traffic.
+The proposed approach combines an interpretable utility-
+based behavioral model with a residual multi-agent reinforcement
+learning policy. The utility model encodes directional preference,
+speed incentive, collision risk, and proximity-aware interaction
+terms derived from behavioral and economic decision-making
+principles. Rather than learning motion policies from scratch,
+the reinforcement learning layer adaptively modulates the utility-
+driven behavior through residual policy learning, enabling emer-
+gent negotiation and interaction behaviors while preserving
+physical interpretability and safety consistency.
+The framework is evaluated using high-resolution aerial tra-
+jectory data collected from heterogeneous traffic environments in
+Lebanon, including a weak-lane multilane freeway and a chaotic
+urban roundabout. The proposed method is benchmarked against
+deterministic interaction models (ORCA), stochastic utility-based
+models, self-driven particle formulations, and purely learning-
+based reinforcement learning approaches without behavioral
+priors. Results demonstrate that the proposed utility-guided
+residual learning framework achieves improved trajectory real-
+ism, interaction stability, and behavioral fidelity under dense non-
+lane-based conditions while maintaining interpretable decision
+structures.
+This work establishes a principled framework for integrating
+behavioral utility theory and multi-agent reinforcement learning
+for decentralized motion generation in weakly structured traffic
+environments.
+Index Terms—Motion Modeling, Reinforcement Learning,
+Multi-Agent Systems, Decision-Making Under Uncertainty, Tra-
+jectory Data, Model Calibration
+I. INTRODUCTION
+In many developing countries, transportation systems oper-
+ate under conditions that differ substantially from the struc-
+tured, lane-disciplined traffic typically assumed in classical
+models [1]–[3]. Weak rule enforcement, heterogeneous vehicle
+fleets, and informal negotiation of right-of-way produce com-
+plex interactions that challenge traditional traffic flow theory
+[4]. Such irregular behaviors including lateral encroachments,
+opportunistic yielding, and abrupt accelerations are prevalent
+in Lebanon, where infrastructure and enforcement limitations
+contribute to weak-lane and non-standard driving patterns [5].
+Accurately representing these settings requires empirical data
+and modeling approaches that remain valid when lane structure
+and deterministic leader-follower assumptions are only weakly
+satisfied.
+Recent advances in aerial data collection enable direct ob-
+servation of naturalistic traffic with high spatial and temporal
+resolution. Drone-based video provides an unobstructed top-
+down view of vehicle motion, allowing large-scale extraction
+of trajectories while preserving behavioral authenticity [6].
+This study consolidates two complementary aerial datasets
+
+===== PAGE 2 =====
+action spaces, sparse rewards, collision instability, and a lack
+of human behavioral priors, ultimately yielding physically
+unrealistic driving behavior.
+To bridge this gap, we introduce a utility-guided residual
+MARL architecture specifically designed for unstructured,
+non-lane-based traffic. By decoupling human behavioral priors
+from deep policy learning, the proposed framework avoids
+the pitfalls of blind reinforcement learning. The architecture
+operates through a four-stage process:
+• Stage 1: Utility Prior: An interpretable baseline util-
+ity formulation (Ubase) captures directional preference,
+collision risk, and speed incentive to generate candidate
+trajectories and nominal actions based on established
+behavioral theories (e.g., Prospect Theory).
+• Stage 2: Interaction Graph: A local interaction graph
+is constructed to capture relative states, time-to-collision
+(TTC), proximity, and velocity differences, utilizing at-
+tention mechanisms to process heterogeneous neighbor-
+hood data.
+• Stage 3: RL Residual: Instead of learning raw control
+actions, the MARL policy learns a residual behavioral
+adjustment (∆U or ∆Θ) to modulate the underlying
+utility parameters.
+• Stage 4: Final Utility Maximization: The final ac-
+tion is determined by maximizing the combined utility
+(Ufinal
+= Ubase + λ∆U), ensuring that the output
+preserves physical realism, interpretability, and safety
+controllability while enabling emergent social behaviors.
+Beyond reproducing vehicle kinematics, weak-lane and
+chaotic driving reflect asymmetric human decision-making
+under perceived risk. Prospect theory provides a principled
+framework to quantify such behaviors relative to reference
+points, highlighting how drivers trade off progress against
+conflict risk. The proposed residual MARL framework com-
+plements this by providing a data-driven mechanism to capture
+implicit interaction rules and spatial negotiation across multi-
+ple agents in dense settings.
+The contributions of this study are:
+• Provision of a consolidated aerial trajectory dataset for
+two weak-lane traffic regimes in Lebanon.
+• Development of a novel utility-guided residual MARL
+framework that enables interaction-only forecasting and
+decentralized negotiation without map priors.
+• Calibration and benchmarking of deterministic interaction
+models (ORCA), stochastic utility formulations (PT), and
+the proposed hybrid MARL under consistent procedures
+across both sites.
+• Behavioral interpretation linking observed aggressiveness
+to stochastic utility parameters, demonstrating MARL’s
+capability to encode complex, emergent traffic interac-
+tions while maintaining physical interpretability.
+This integrated approach establishes a robust foundation for
+modeling heterogeneous, non-lane-based traffic using a prin-
+cipled combination of deterministic, stochastic, and learning-
+based methods.
+II. LITERATURE REVIEW
+Modeling vehicle motion in traffic systems has been a
+central topic in transportation research, with a wide range
+of approaches developed to describe how drivers interact
+with their surroundings. Traditional models largely rely on
+structured, lane-based assumptions, while more recent work
+has explored interaction-driven, behavioral, and learning-based
+frameworks to better capture complex and unstructured traf-
+fic environments. This section reviews the relevant literature
+across four key domains: classical microscopic models, non-
+lane-based traffic modeling, interaction-based motion models,
+and data-driven learning approaches.
+A. Classical Microscopic Traffic Models
+Microscopic traffic flow models describe the behavior of
+
+===== PAGE 3 =====
+C. Interaction-Based and Continuous-Space Models
+To address the limitations of lane-based formulations, a
+class of models has emerged that represents vehicle motion
+through local interactions in continuous space. One prominent
+example is the Social Force Model (SFM) [10], originally de-
+veloped for pedestrian dynamics. In this framework, agents are
+subject to attractive forces toward desired motion and repulsive
+forces from nearby agents, enabling flexible modeling of dense
+and unstructured interactions.
+In robotics and multi-agent systems, collision avoidance
+has been extensively studied using velocity-based approaches
+such as Velocity Obstacles (VO) and Reciprocal Velocity
+Obstacles (RVO). Building on these concepts, the Optimal
+Reciprocal Collision Avoidance (ORCA) framework [?], [?]
+formulates collision avoidance as a set of linear constraints
+in velocity space. Each agent computes a feasible set of
+collision-free velocities by considering pairwise interactions
+with neighboring agents and selects the velocity closest to its
+preferred motion.
+These approaches are well-suited for modeling multi-agent
+interactions in continuous space and can scale to dense envi-
+ronments without requiring explicit lane definitions. However,
+they are primarily geometric and deterministic in nature,
+focusing on collision avoidance rather than behavioral realism.
+As a result, they do not explicitly capture driver heterogeneity,
+risk perception, or decision-making under uncertainty, which
+are critical components of real-world driving behavior.
+D. Behavioral and Stochastic Models
+Human driving behavior is inherently stochastic and influ-
+enced by subjective perceptions of risk and reward. Behavioral
+models aim to capture these aspects by incorporating psycho-
+logical and decision-theoretic principles into motion modeling.
+Prospect Theory [?] provides a well-established framework
+for modeling decision-making under risk, where outcomes are
+evaluated relative to a reference point and losses are weighted
+more heavily than gains.
+In transportation research, prospect-theoretic formulations
+have been applied to problems such as route choice and
+gap acceptance, demonstrating the importance of asymmetric
+risk perception in driving decisions. These models provide a
+natural way to represent aggressive or conservative behavior,
+particularly in environments where drivers must continuously
+evaluate trade-offs between progress and safety.
+Despite their strengths, most behavioral models are not
+formulated in a fully continuous two-dimensional setting and
+often rely on simplified interaction assumptions. Integrating
+behavioral decision-making with realistic multi-agent interac-
+tions remains an open challenge, particularly in non-lane-based
+traffic environments.
+E. Learning-Based and Multi-Agent Approaches
+Recent advances in machine learning have led to the de-
+velopment of data-driven approaches for modeling vehicle
+behavior, particularly through reinforcement learning. In this
+paradigm, agents learn control policies by interacting with an
+environment and optimizing a reward function that encodes
+desired objectives such as safety, efficiency, and comfort.
+Multi-Agent Reinforcement Learning (MARL) extends this
+framework to settings where multiple agents interact simulta-
+neously. The Multi-Agent Deep Deterministic Policy Gradient
+(MADDPG) algorithm [?] is a widely used approach for
+continuous control problems, enabling agents to learn decen-
+tralized policies while leveraging centralized training. Such
+methods have been applied to autonomous driving scenarios,
+demonstrating the ability to capture complex interaction pat-
+terns and emergent behaviors.
+Learning-based approaches offer significant flexibility and
+can adapt to complex, high-dimensional environments without
+requiring explicit modeling assumptions. However, they often
+lack interpretability and depend heavily on the design of
+reward functions and training data. Moreover, their behavior
+
+===== PAGE 4 =====
+used drones to analyze traffic flow at urban roundabouts, show-
+ing how high-resolution aerial imagery can reveal subtle lane
+encroachments, yielding patterns, and circulation strategies
+that are often invisible in aggregated loop-detector data [12].
+In parallel, several open datasets have emerged that provide
+high-fidelity trajectories from aerial views for intersections
+and roundabouts. Researchers introduced the TUMDOT-MUC
+dataset, a large-scale collection of multimodal trajectories (mo-
+torized vehicles and vulnerable road users) gathered by drone
+over multiple urban sites, specifically designed to support
+model calibration and safety analysis in complex multimodal
+environments [13]. Other researchers published a dataset of
+UAV-based roundabout aerial images with detailed vehicle an-
+notations, enabling researchers to build and validate computer-
+vision pipelines for vehicle detection and, by extension, tra-
+jectory extraction in circular intersections [14]. More recently,
+the MiTra dataset was released, which provides drone-based
+trajectories for freeways with ramps across all traffic states,
+illustrating how persistent aerial observation can be used to
+study microscopic behavior from free flow to congestion [15].
+Aerial data has also been leveraged for proactive safety anal-
+ysis. The Extra Brake Required to Avoid a Crash (EBRAC)
+surrogate measure was proposed using drone-based image-
+recording data, quantifying near-crash conflicts at intersections
+by reconstructing detailed braking profiles and interaction
+dynamics [16]. This work illustrates how high-resolution tra-
+jectories can be transformed into interpretable safety indicators
+that directly reflect road-user maneuvers. Similar methodolo-
+gies have been applied to other drone-based datasets to derive
+conflict-based safety metrics and evaluate how geometric
+design and control strategies affect risk.
+H. Research Gap
+Overall, the literature shows (i) strong evidence that weak
+lane discipline and heterogeneous traffic can lead to highly
+irregular, “chaotic” driving patterns; (ii) a growing family of
+non-lane-based car-following and agent-based models tailored
+to disordered streams; and (iii) an expanding ecosystem of
+aerial trajectory datasets that enable detailed observation of
+such behavior. However, gaps remain in how these methods
+are applied across different geometric contexts.
+For freeway environments in developing countries, only
+limited work has calibrated microscopic models to non-lane-
+based longitudinal behavior, where drivers frequently deviate
+from lane centers, negotiate lateral space informally, and adopt
+highly variable spacing at moderate to high speeds. Existing
+studies rarely evaluate how classical lane-based models such
+as IDM perform relative to non-lane-based formulations when
+exposed to such freeway conditions.
+Similarly, for small, nominally single-lane roundabouts,
+prior research rarely calibrates or compares models using high-
+frequency trajectories that capture the lane-free circulation,
+opportunistic merging, and lateral encroachment characteristic
+of these sites. In particular, there is little evidence on whether
+IDM can adapt to these chaotic interaction patterns or whether
+non-lane-based models (e.g., FVDM, two-sided gap models,
+SFM) offer clear advantages.
+The present study addresses these gaps by (i) extracting
+detailed vehicle trajectories from aerial video at both freeway
+and roundabout sites in Lebanon, (ii) calibrating lane-based
+(IDM) and non-lane-based models (FVDM and SFM) to these
+contrasting environments, and (iii) systematically comparing
+their ability to reproduce the observed acceleration, spacing,
+and maneuvering patterns. This dual-context evaluation en-
+ables a unified assessment of model robustness across two
+representative forms of non-lane-based driving: high-speed
+freeway flow and chaotic roundabout circulation.
+III. METHODOLOGY
+This work proposes a utility-guided residual multi-agent
+reinforcement learning framework for motion generation in
+weakly structured non-lane-based traffic. Unlike conventional
+
+===== PAGE 5 =====
+Each agent observes a local neighborhood of at most K
+nearest neighbors within a perception radius Rp:
+N t
+i =
+n
+j ∈ A \ {i}
+∥rt
+j − rt
+i∥2 ≤ Rp
+o
+1:K,
+(2)
+where rt
+i = (xt
+i, yt
+i) and the subset retains the K closest
+neighbors by Euclidean distance.
+The objective of each agent is to generate feasible motion
+that progresses along the corridor, avoids collisions, remains
+within drivable boundaries, and negotiates shared space with
+neighboring agents. Unlike classical lane-based formulations,
+agents are not restricted to discrete lane IDs or fixed leader-
+follower roles.
+B. Utility-Based Behavioral Prior
+The nominal motion behavior of each agent is governed by a
+utility-maximization process over a discrete control-candidate
+set. At each time step, agent i evaluates candidates generated
+from a finite grid of longitudinal acceleration and steering
+values,
+G =
+
+(a, δ)
+= Aacc × Asteer,
+(3)
+and selects the candidate that maximizes expected utility after
+one-step kinematic bicycle rollout:
+(a∗
+i , δ∗
+i ) = arg max
+(a,δ)∈G Ui(s′
+i(a, δ); Θi) ,
+(4)
+where s′
+i(a, δ) is the predicted next state obtained from the
+bicycle dynamics and Θi denotes the agent’s behavioral utility
+parameters.
+The total utility consists of five components:
+Ui = Udir + Uspeed + Udist − Ucol − Upath.
+(5)
+1) Directional Utility: Directional utility encourages mo-
+tion aligned with the local corridor tangent rather than an
+unconstrained destination vector. Let
+ˆmi =
+r′
+i − ri
+∥r′
+i − ri∥2
+(6)
+denote the unit move direction induced by a candidate next
+position r′
+i, and let ˆti denote the unit tangent of the corridor
+centerline at the ego agent’s current projection. Then
+Udir = Sθ ˆm⊤
+i ˆti,
+(7)
+where Sθ > 0 controls directional sensitivity. This formulation
+remains valid for both positive- and negative-direction traffic
+because directionality is defined by the corridor orientation
+rather than the global x-axis.
+2) Speed Incentive: Speed incentive rewards candidate roll-
+
+===== PAGE 6 =====
+5) Path Adherence and Boundary Constraints: Although
+agents negotiate laterally inside the corridor without dis-
+crete lane constraints, they remain subject to infrastructural
+boundaries. A path-adherence penalty discourages proximity
+to corridor edges and off-road intrusion:
+Upath = wℓ
+
+===== PAGE 7 =====
+IV. DATA COLLECTION AND TRAJECTORY EXTRACTION
+This study uses high-resolution aerial vehicle trajecto-
+ries collected over multilane freeway segments in Jounieh,
+Lebanon, under weak lane discipline and heterogeneous traffic
+conditions. Traffic was recorded a drone in a near-stationary
+hover, providing a top-down view that reduces occlusions
+and supports simultaneous tracking of interacting vehicles.
+The site exhibits pronounced non-lane-based longitudinal and
+lateral interactions, including informal gap negotiation and
+shockwave-like disturbance propagation.
+Trajectory extraction and site characterization are docu-
+mented in detail by Khoueiry et al. [17], readers are referred
+to [17] for the full data-collection protocol and extraction
+pipeline. In this paper, we restrict attention to passenger-
+vehicle trajectories with valid kinematic transitions and use
+corridor-aligned geometry derived from the observed streams
+as the spatial reference for utility evaluation.
+V. CALIBRATION METHODOLOGY
+The utility model in Eq. (??) (directional alignment, speed
+alignment, proximity reward, collision penalty, and boundary
+adherence) contains ten free parameters
+θ =
+
+===== PAGE 8 =====
+Fig. 1.
+Calibration fit diagnostics: empirical CDF and histogram of the observed-like candidate rank, utility margin relative to the best alternative (core
+p10–p99 window), and per-vehicle closed-loop tracking loss.
+c) Identifiability.: Of 240 closed-loop-scored trials, only
+a small subset lies near J(θ⋆); the near-optimal/top cloud
+still exhibits large coefficient-of-variation across most coor-
+dinates (Fig. ??). The strongest tradeoff is between Sv and γ
+(correlation −0.85), with additional coupling among (Sθ, Sv),
+(wx, wc), and (wc, wℓ). Thus the data identify a region of
+acceptable utility weights more reliably than a unique point
+estimate.
+d) Implications.: For the remainder of this paper we
+(i) fix θrob as the nominal utility prior, (ii) use the reported
+percentile ranges as bounds for global sensitivity analysis,
+and (iii) interpret residual policy learning as refining behavior
+within an already plausible, but non-unique, utility basin.
+VII. RESULTS
+VIII. CONCLUSION
+IX. LIMITATIONS
+In calibration, although the calibrated utility prior provides a
+usable working point for residual learning, several limitations
+should be noted. First, the ten-dimensional utility parameter
+vector is only weakly identified: multiple substantially dif-
+ferent parameter combinations attain nearly the same closed-
+loop objective, with strong tradeoffs such as that between
+Sv and γ. Consequently, the calibration identifies a region of
+acceptable behavior rather than a unique optimum, which is
+why we report a robust median of near-optimal trials together
+with percentile ranges instead of relying on a single best
+vector. Second, one-step ranking remains imperfect on the
+discrete candidate grid—the observed-like action is frequently
+competitive (median rank near eight; top-ten hit rate about
+63%) but is rarely selected as the unique maximizer—so the
+one-step likelihood alone under-constrains the parameters and
+must be complemented by short-horizon closed-loop tracking.
+Third, per-vehicle local fits exhibit wide dispersion, indicating
+residual heterogeneity that a single population prior cannot
+fully capture. Finally, global sensitivity conclusions are mean-
+ingful only when Sobol ranges are aligned with the calibrated
+uncertainty region; using substantially narrower ad-hoc bounds
+can understate (or misattribute) parameter influence relative to
+the operating regime used downstream.
+
+===== PAGE 9 =====
+Fig. 2. Global scored-trial distributions of the ten utility parameters (240 closed-loop-scored trials from three restarts). Histograms and KDEs are computed
+inside each parameter’s central 95% interval; vertical markers indicate the median, best, and robust values when they fall in that window.
+Fig. 3. Per-vehicle local-fit parameter distributions (200 trajectories). Histograms and KDEs use the central 95% mass for each coordinate.
+REFERENCES
+[1] S. Chandra and U. Kumar, “Capacity estimation procedure for two-
+lane roads under mixed traffic conditions,” Journal of Transportation
+Engineering, vol. 130, no. 5, pp. 737–743, 2004.
+[2] S. I. Khan and P. Maini, “Modeling heterogeneous traffic flow,” Trans-
+portation research record, vol. 1678, no. 1, pp. 234–241, 1999.
+[3] W. Sleiman, M. Haque, M. S. Amin, P. Beigi, M. Khoueiry, S. Kang,
+and S. Hamdar, “Diffusion process-based model for network trajectory
+propagation: Formulation, data mining, and cross-comparative analysis,”
+IEEE Transactions on Intelligent Transportation Systems, 2026.
+[4] S. P. Hoogendoorn and P. H. Bovy, “State-of-the-art of vehicular traffic
+flow modelling,” Proceedings of the Institution of Mechanical Engineers,
+Part I: Journal of Systems and Control Engineering, vol. 215, no. 4, pp.
+283–303, 2001.
+[5] G. Asaithambi and G. Shravani, “Overtaking behaviour of vehicles on
+undivided roads in non-lane based mixed traffic conditions,” Journal of
+traffic and transportation engineering (English edition), vol. 4, no. 3,
+pp. 252–261, 2017.
+
+===== PAGE 10 =====
+TABLE II
+CALIBRATED UTILITY PARAMETERS: BEST TRIAL, ROBUST MEDIAN OF THE NEAR-OPTIMAL/TOP CLOUD, TOP-CLOUD p50/p95, AND PER-VEHICLE
+LOCAL-FIT MEDIAN WITH CENTRAL 95% INTERVAL.
+Param.
+Best
+Robust
+Top p50
+Top p95
+Per-ID p50
+Per-ID 95% CI
+Sθ
+3.411
+4.216
+4.216
+8.299
+5.297
+[0.295, 9.728]
+Sv
+2.809
+3.364
+3.364
+9.325
+3.737
+[0.182, 9.585]
+ξi
+3.000
+4.074
+4.074
+6.791
+5.373
+[1.227, 9.609]
+Sd
+4.343
+5.802
+5.802
+7.604
+6.393
+[0.818, 9.890]
+γ
+1.700
+1.453
+1.453
+4.048
+0.854
+[0.155, 9.009]
+wx
+8.297
+5.449
+5.449
+8.257
+5.121
+[0.322, 9.850]
+wy
+9.747
+3.906
+3.906
+9.439
+6.015
+[1.030, 9.774]
+wc
+97.45
+373.9
+373.9
+807.7
+477.8
+[23.2, 963.7]
+wℓ
+54.91
+44.16
+44.16
+
+===== PAGE 11 =====
+APPENDIX A
+SENSITIVITY ANALYSIS
+Understanding parameter sensitivity is crucial to ensure
+that the agent-based model produces reliable, realistic, and
+robust behavior under a wide range of conditions [?], [?].
+The sensitivity analysis reveals how robust the model is to
+parameter variations and helps guide parameter tuning.
+To systematically assess model robustness, we perform both
+local and global sensitivity analyses. Local analysis examines
+the effect of small variations in individual parameters on
+each component of the utility function, providing insight
+into immediate system responsiveness. Global analysis, using
+techniques such as Sobol indices, quantifies the contribution
+of each parameter—including interactions—across their entire
+plausible range. Together, these analyses reveal how sensitive
+the model is to parameter changes and guide informed tuning
+for reliable and realistic agent behavior.
+In this chapter, we focus on the local sensitivity analysis,
+while the global sensitivity analysis will be conducted in a
+later stage of the dissertation.
+APPENDIX B
+LOCAL SENSITIVITY ANALYSIS
+Local sensitivity analysis quantifies how small parameter
+perturbations affect each component of the utility. We analyze
+the five utility terms from Equation ??—directional alignment,
+speed incentive, proximity incentive, collision penalty, and
+path adherence—separately.
+Directional Alignment
+Directional utility rewards candidate motion aligned with
+the local corridor tangent rather than a destination heading.
+Let ˆm denote the unit move direction induced by a candidate
+next position and ˆt the local corridor unit tangent. Then
+Udir = Sθ ( ˆm · ˆt).
+(30)
+∂Udir
+∂Sθ
+= ˆm · ˆt.
+(31)
+∂Udir
+∂( ˆm · ˆt) = Sθ.
+(32)
+Thus Sθ linearly scales the directional reward. Utility is
+maximized when ˆm · ˆt = 1 (perfect corridor alignment)
+and becomes negative when the candidate move opposes the
+corridor orientation. This remains valid for both positive- and
+negative-direction traffic because directionality is defined by
+corridor geometry.
+Speed Incentive
+Speed utility rewards candidate bicycle-rollout speeds close
+to a desired speed. Define the symmetric closeness ratio
+ρ = min(vcand, vdes)
+max(vcand, vdes) ∈ (0, 1],
+(33)
+and
+Uspeed = Sv
+ρ
+1 + ρ(ξi−1)/2 .
+(34)
+Fig. 4. Directional utility Udir versus corridor alignment ˆm·ˆt and directional
+sensitivity Sθ.
+The corresponding partial derivatives are
+∂Uspeed
+∂Sv
+=
+ρ
+1 + ρ(ξi−1)/2 ,
+(35)
+∂Uspeed
+∂ξi
+= − Sv ρ(ξi+1)/2 ln ρ
+
+===== PAGE 12 =====
+Fig. 5. Speed utility Uspeed versus candidate speed vcand and desired speed vdes (with ξi slices).
+Fig. 6. Proximity utility Udist versus interaction exponent γ, effective Frenet distance deff, and perception horizon Hp.
+Collision-Risk Penalty
+The primary partial derivatives for the collision-risk penalty
+are
+Ucol = wc min(Pi,g, 1),
+(43)
+∂Ucol
+∂wc
+= min(Pi,g, 1),
+(44)
+∂Ucol
+∂Pi,g
+= wc
+(when Pi,g < 1).
+(45)
+Increasing wc makes the utility more sensitive to predicted
+collision probability and therefore promotes more risk-averse
+behavior.
+For the single-neighbor isotropic Gaussian case, let d =
+∥⃗rg − ⃗µj∥ and Σj = σ2I. Then
+Pj,g(d, σ) =
+1
+2πσ2 exp
+
+− d2
+2σ2
+
+,
+(46)
+and the contribution to the penalty is proportional to wcPj,g.
+Small σ creates a sharp localized risk field, while larger σ
+yields a broader but lower-amplitude risk region. Excessively
+large wc can make agents overly cautious.
+Path Adherence
+The path-adherence term and its derivatives are
+Upath = wℓ
+
+===== PAGE 13 =====
+Fig. 7. Collision utility contribution versus distance to the predicted neighbor position d = ∥⃗rg − ⃗µj∥ and prediction uncertainty σ.
+Fig. 8. Path-adherence utility Upath versus path-deviation coefficient β and lateral deviation ℓi.
+the entire parameter space and captures both direct parameter
+effects and higher-order interactions. This analysis identifies
+the most influential utility parameters, guides calibration ef-
+forts, and reveals parameters that have minimal influence on
+the model output.
+The proposed framework represents traffic agents moving
+in continuous two-dimensional space. At each simulation
+step, every agent generates feasible acceleration and steering
+candidates using the kinematic bicycle model and selects the
+candidate that maximizes the utility function defined in Equa-
+tion ??. The utility consists of corridor directional preference,
+speed incentive, Frenet-distance proximity incentive, collision-
+risk penalty, and path-adherence penalty.
+The model performance is evaluated using the following
+simulation-level objective:
+Y =
+X
+k∈A
+dfinal
+k
++ Ncoll Cpenalty,
+(51)
+where dfinal
+k
+denotes the final Euclidean distance between
+agent k and its destination, Ncoll is the total number of
+collision events during the simulation, and Cpenalty is a fixed
+collision penalty. Lower values of Y correspond to better
+overall system performance.
+The sensitivity analysis is performed using the variance-
+based Sobol method [?], [?]. Let the model output be
+Y = f(X1, X2, . . . , XD),
+where Xj represents independent model parameters. The
+output variance is decomposed as
+Var(Y ) =
+D
+X
+j=1
+Vj +
+X
+1≤j<k≤D
+Vjk + · · · + V12...D.
+(52)
+The first-order Sobol index is
+Sj =
+Vj
+Var(Y ),
+(53)
+while the total-order Sobol index is
+STj = 1 − VarX∼j
+
+===== PAGE 14 =====
+index measures its overall contribution, including all interac-
+tion effects.
+Sampling is performed using Sobol quasi-random sequences
+generated with the SALib library. A base sample size of N =
+1024 is used for the ten-dimensional parameter space, resulting
+in
+Neval = N(D + 2) = 1024(10 + 2) = 12288
+simulation evaluations.
+Table III summarizes the parameter ranges considered dur-
+ing the sensitivity analysis.
+TABLE III
+MODEL PARAMETERS AND PREDEFINED RANGES USED IN THE SOBOL
+SENSITIVITY ANALYSIS.
+Parameter
+Description
+Range
+Sθ
+Corridor directional weight
+[0.2, 1.0]
+Sv
+Speed-incentive weight
+[0.2, 1.0]
+ξi
+Speed-mismatch steepness
+[1.5, 3.5]
+Sd
+Proximity-incentive weight
+[0.2, 1.0]
+γ
+Proximity decay steepness
+[0.5, 3.0]
+wx
+Longitudinal Frenet weight
+[0.5, 5.0]
+wy
+Lateral Frenet weight
+[0.5, 5.0]
+wc
+Collision-risk penalty weight
+[0.1, 20.0]
+wℓ
+Path-adherence penalty weight
+[5.0, 50.0]
+β
+Path-adherence saturation rate
+[0.1, 5.0]
+The proximity incentive employs the Frenet effective dis-
+tance
+deff = wx|∆s| + wy|∆n|,
+(55)
+while the perception horizon is computed as
+Hp = max(κvi, Hmin).
+(56)
+The speed incentive uses the normalized speed ratio
+ρ = min(vcand, vdes)
+max(vcand, vdes).
+(57)
+Collision risk follows the probabilistic formulation pre-
+sented in the proposed methodology, where neighboring agents
+are propagated over the candidate time step and collision
+probabilities are accumulated before being weighted by wc.
+A. Sensitivity Analysis Results
+Table IV summarizes the estimated first-order and total-
+order Sobol indices for all utility parameters.
+The sensitivity analysis demonstrates that the speed-
+incentive weight Sv is the dominant model parameter, exhibit-
+ing the largest first-order and total-order sensitivity indices.
+The path-adherence saturation parameter β and the corridor
+directional weight Sθ are the next most influential parameters,
+followed by the path-adherence penalty weight wℓ. These four

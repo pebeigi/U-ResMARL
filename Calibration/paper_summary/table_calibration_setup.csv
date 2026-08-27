@@ -1,0 +1,13 @@
+item,value
+Trajectory rows (valid),190767
+One-step choice samples,2000
+Random-search trials,400
+Closed-loop candidates retained,240
+Closed-loop windows,40
+Closed-loop horizon (steps),8
+Softmax temperature,0.25
+One-step weight,0.1
+Closed-loop weight,1.0
+Tracking-rank weight,1.0
+Per-vehicle diagnostic plots,200
+Utility frame,corridor

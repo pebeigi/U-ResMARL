@@ -1,0 +1,4 @@
+m_per_px=0.04354578
+origin=image top-left
+x increases right, y increases down (image coords)
+FPS=29.97028860724333

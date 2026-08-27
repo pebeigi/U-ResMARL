@@ -1,0 +1,39 @@
+\section{Data}
+\label{sec:data}
+
+This study uses high-resolution aerial vehicle trajectories collected over multilane freeway segments in Jounieh, Lebanon, under weak lane discipline and heterogeneous traffic conditions. Traffic was recorded with a DJI Mini~3 drone in a near-stationary hover, providing a top-down view that reduces occlusions and supports simultaneous tracking of interacting vehicles. Two complementary observational scales are available: a higher-altitude recording covering a longer freeway segment and a lower-altitude recording providing a more localized view with finer spatial resolution. Both sites exhibit pronounced non-lane-based longitudinal and lateral interactions, including informal gap negotiation and shockwave-like disturbance propagation. Fig.~\ref{fig:data_freeway_frame} shows a representative aerial frame from the study corridor.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{Pics/Freeway.png}
+\caption{Aerial frame of a multilane freeway segment in Jounieh, Lebanon, recorded by a near-stationary drone under weak lane discipline. The top-down view captures simultaneous vehicle interactions used for trajectory extraction; full site documentation is provided in~\cite{khoueiry2025universal}.}
+\label{fig:data_freeway_frame}
+\end{figure}
+
+Trajectory extraction and site characterization are documented in detail by Khoueiry et al.~\cite{khoueiry2025universal}, including drone viewpoints, landmark references, dataset summaries by altitude and travel direction, and spatiotemporal diagnostics such as speed-contour heatmaps. For completeness, Table~\ref{tab:data_summary} reports the main dataset attributes used in the present calibration and modeling experiments; readers are referred to~\cite{khoueiry2025universal} for the full data-collection protocol and extraction pipeline. In this paper, we restrict attention to passenger-vehicle trajectories with valid kinematic transitions and use corridor-aligned geometry derived from the observed streams as the spatial reference for utility evaluation.
+
+\begin{table}[t]
+\centering
+\caption{Summary of the Lebanon freeway trajectory data used in this study (full site documentation in~\cite{khoueiry2025universal}).}
+\label{tab:data_summary}
+\begin{tabular}{ll}
+\toprule
+Attribute & Description \\
+\midrule
+Location & Jounieh, Lebanon (multilane urban freeway) \\
+Collection platform & DJI Mini~3 (near-stationary aerial hover) \\
+Observational scales & High-altitude (longer coverage) and low-altitude (finer resolution) \\
+Traffic regime & Weak / non-lane-based interactions, heterogeneous composition \\
+Use in this paper & Utility calibration, closed-loop tracking, residual MARL evaluation \\
+Valid transition rows used in calibration & $190{,}767$ passenger-vehicle records \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% BibTeX entry (paper under review):
+% @unpublished{khoueiry2025universal,
+%   author  = {Khoueiry, Michel S. and Beigi, Pedram and Hamdar, Samer H.},
+%   title   = {Towards Universal Autonomy: Modeling Chaotic and Non-Lane Based Driving Behavior Using Naturalistic Trajectories},
+%   note    = {Under review},
+%   year    = {2025}
+% }

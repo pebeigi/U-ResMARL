@@ -1,0 +1,25 @@
+Utility Calibration Results — Paper Notes
+================================================
+
+Setup
+-----
+Utility parameters were calibrated from the Lebanon trajectory set using 2000 one-step choice samples and 40 short closed-loop windows (8 steps each). A random search over 400 parameter vectors screened candidates by one-step NLL and target rank; the best 240 candidates were then scored with a closed-loop tracking objective in the corridor frame.
+
+Fit quality
+-----------
+The selected parameter set achieved objective 1.132, closed-loop loss 0.549, and mean target rank 11.39. On the 2000 held choice samples, the observed-like candidate had median rank 8.0 (mean 11.06), with top-5 / top-10 hit rates of 35.6% / 62.9%.
+
+Parameter interpretation
+------------------------
+Directional and speed weights (S_theta, S_v) and proximity weights (S_d, w_x, w_y) concentrate in moderate-to-high values, while lane-keeping (w_ell, beta) and collision (w_c) exhibit broader per-vehicle dispersion. Table summaries report 95% percentiles (per-vehicle central 95% interval p2.5–p97.5 and upper p95; global top-trial p95) for use as GSA bounds.
+
+Suggested figure/table use
+--------------------------
+- Table: table_parameter_95pct.(csv|tex)     -> main 95% percentile parameter table
+- Table: table_fit_quality.(csv|tex)         -> calibration quality metrics
+- Table: table_calibration_setup.(csv|tex)   -> methods appendix
+- Fig: fig_parameter_ranges_forest.png       -> uncertainty with 95% intervals
+- Fig: fig_parameter_distributions.png       -> hist + KDE + 95% band
+- Fig: fig_fit_quality.png                   -> ranking / tracking diagnostics
+
+Files written under: C:\Users\Pedram\NR-MAP\calibration\paper_summary
