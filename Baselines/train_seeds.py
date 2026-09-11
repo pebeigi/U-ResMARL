@@ -27,6 +27,8 @@ from Baselines.registry import LEARNED_CHECKPOINTS, seed_checkpoint
 
 TRAINERS: dict[str, list[str]] = {
     "residual_marl": ["-m", "RL.train_ppo"],
+    "residual_param": ["-m", "RL.train_ppo", "--residual-mode", "param_delta"],
+    "residual_nominal": ["-m", "RL.train_ppo", "--prefer-params", "nominal"],
     "residual_collpen": ["-m", "RL.train_ppo"],
     "residual_collpen_dense": ["-m", "RL.train_ppo"],
     "direct_discrete_rl": ["-m", "Baselines.train_direct_discrete_rl"],
@@ -72,7 +74,7 @@ def main() -> None:
     parser.add_argument("--model", choices=sorted(TRAINERS), default="residual_marl")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--jobs", type=int, default=1, help="Concurrent training runs")
-    parser.add_argument("--log-dir", type=Path, default=Path("RL/logs/seeds"))
+    parser.add_argument("--log-dir", type=Path, default=Path("RL/logs/v2/seeds"))
     parser.add_argument(
         "--overwrite",
         action="store_true",

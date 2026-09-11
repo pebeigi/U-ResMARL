@@ -1,8 +1,7 @@
-"""Proposed model: calibrated utility prior + learned residual on the parameters.
+"""Proposed model: calibrated utility prior + learned residual.
 
-Loads a policy trained by `RL/train_ppo.py`; the RL package itself is untouched.
-If no checkpoint is given the controller falls back to zero residual, which
-reduces exactly to the utility-only prior.
+Default residual interface adds a continuous bias to the discrete utility grid
+(``candidate_logits``). Legacy checkpoints that edit Θ (``param_delta``) still load.
 """
 
 from __future__ import annotations
@@ -17,37 +16,67 @@ from Baselines.controllers import BaseController
 from Baselines.dynamics import observation
 from RL.calibration_io import apply_residual, load_base_params, residual_scales_for_checkpoint
 from RL.param_gauge import AMPLITUDE_KEYS, AMPLITUDE_LOGIT_KEYS
-from utility_model import TrafficAgent, select_best_candidate
+from utility_model import (
+    TrafficAgent,
+    select_best_candidate,
+    select_candidate_with_logit_residual,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
 
-DEFAULT_CHECKPOINT = Path("RL/checkpoints/residual_policy.pt")
+DEFAULT_CHECKPOINT = Path("RL/checkpoints/v2/residual_policy.pt")
 
 
-def load_residual_policy(checkpoint: Path, obs_dim: int) -> Any:
+def load_residual_policy(checkpoint: Path, obs_dim: int, *, allow_legacy: bool = False) -> Any:
     """Rebuild a `TorchResidualPolicy` from a training checkpoint."""
     import torch
 
-    from RL.train_ppo import TorchResidualPolicy
+    from RL.train_ppo import (
+        TorchResidualPolicy,
+        action_space_from_blob,
+        residual_mode_from_blob,
+    )
 
     blob = torch.load(checkpoint, map_location="cpu")
+    if not allow_legacy:
+        from RL.protocol import validate_checkpoint
+        validate_checkpoint(blob, obs_dim, checkpoint)
     scales = residual_scales_for_checkpoint(blob)
-    gauge = str(blob.get("param_gauge", "additive" if "S_v" in (blob.get("residual_scales") or {}) else "logit_simplex"))
+    gauge = str(
+        blob.get(
+            "param_gauge",
+            "additive" if "S_v" in (blob.get("residual_scales") or {}) else "logit_simplex",
+        )
+    )
+    residual_mode = residual_mode_from_blob(blob)
+    action_dim = blob.get("action_dim")
+    if action_dim is None and residual_mode == "candidate_logits":
+        action_dim = len(blob.get("residual_scales") or {})
     policy = TorchResidualPolicy(
         obs_dim=int(blob.get("obs_dim", obs_dim)),
         hidden_dim=int(blob.get("hidden_dim", 128)),
         residual_scales=scales,
         highway_length=float(blob.get("highway_length", 500.0)),
         param_gauge=gauge,
+        action_space=action_space_from_blob(blob),
+        residual_mode=residual_mode,
+        action_dim=int(action_dim) if action_dim is not None else None,
     )
-    policy.load_state_dict(blob["state_dict"])
+    missing, unexpected = policy.load_state_dict(blob["state_dict"], strict=False)
+    stale = [k for k in missing if not k.startswith("value_")]
+    if stale or unexpected:
+        raise ValueError(
+            f"Checkpoint {checkpoint} does not match the policy: "
+            f"missing={stale}, unexpected={list(unexpected)}"
+        )
+    policy.training_base_params = blob.get("base_params")
     policy.eval()
     return policy
 
 
 class ResidualMARLController(BaseController):
-    """U(a; gauge(Theta_base, Delta(o))) with shared PPO residual on logits + shape."""
+    """Utility prior + residual (candidate logits by default, or param ΔΘ)."""
 
     def __init__(
         self,
@@ -70,21 +99,20 @@ class ResidualMARLController(BaseController):
         if self.policy is not None or self.checkpoint is None:
             return
         if not self.checkpoint.exists():
-            if not self._warned:
-                print(
-                    f"[{self.name}] checkpoint {self.checkpoint} not found; "
-                    "running with zero residual (== utility prior)."
-                )
-                self._warned = True
-            return
+            raise FileNotFoundError(f"{self.name}: missing {self.checkpoint}; train this model before evaluation")
         from Baselines.dynamics import observation_dim
 
         self.policy = load_residual_policy(self.checkpoint, observation_dim(scenario))
+        if self.freeze_keys and self.policy.residual_mode != "param_delta":
+            raise ValueError("Parameter ablations require a param_delta checkpoint; candidate_logits masks would be no-ops")
+        trained_base = self.policy.training_base_params
+        if trained_base is not None and trained_base != self.base_params:
+            raise ValueError("Evaluation prior differs from the checkpoint's frozen training prior")
 
     def _effective_freeze_keys(self) -> tuple[str, ...]:
         if not self.freeze_keys:
             return ()
-        if self.policy is not None and self.policy.param_gauge == "additive":
+        if self.policy is not None and getattr(self.policy, "param_gauge", "") == "additive":
             logit_to_amp = dict(zip(AMPLITUDE_LOGIT_KEYS, AMPLITUDE_KEYS))
             return tuple(logit_to_amp.get(key, key) for key in self.freeze_keys)
         return self.freeze_keys
@@ -108,17 +136,34 @@ class ResidualMARLController(BaseController):
         step: int,
     ) -> list[tuple[float, float]]:
         controls: list[tuple[float, float]] = []
+        mode = getattr(self.policy, "residual_mode", "param_delta") if self.policy else "param_delta"
         for i, agent in enumerate(agents):
             if agent.reached_destination:
                 controls.append((0.0, 0.0))
                 continue
-            if self.policy is not None:
+            if self.policy is None:
+                chosen = select_best_candidate(
+                    i, agent, agents, self.base_params, scenario.sim_config
+                )
+            elif mode == "candidate_logits":
+                obs = observation(agents, i, scenario)
+                residual, _ = self.policy.act(np.asarray(obs, dtype=np.float32), self.explore_std)
+                chosen, _, _ = select_candidate_with_logit_residual(
+                    i,
+                    agent,
+                    agents,
+                    self.base_params,
+                    scenario.sim_config,
+                    logit_residual=np.asarray(residual, dtype=float),
+                )
+            else:
                 obs = observation(agents, i, scenario)
                 delta, _ = self.policy.act(np.asarray(obs, dtype=np.float32), self.explore_std)
+                if not isinstance(delta, dict):
+                    delta = {}
+                # Inference-time ablations only apply to param residuals.
                 params = self._apply_delta(delta)
-            else:
-                params = self.base_params
-            chosen = select_best_candidate(i, agent, agents, params, scenario.sim_config)
+                chosen = select_best_candidate(i, agent, agents, params, scenario.sim_config)
             controls.append(
                 (
                     float(chosen.get("accel_longitudinal", 0.0)),

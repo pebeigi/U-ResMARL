@@ -4,9 +4,16 @@
 Site boundaries are the provided outer/island polygons in
 ``Jounieh_Road_Boundaries.csv`` (not PCA envelopes).
 
+All IDs stay in the CSV. ``keep_ego`` marks vehicles used as calibration
+targets; parked / short tracks remain as neighbors. Times are snapped to a
+shared 0.1 s grid so agents around an ego ID join on the same clock.
+Each ID's first sample is the initial state and last sample is the destination.
+
 Outputs:
   prepared/trajectories_calibration.csv
   prepared/lane_code_map.csv
+  prepared/vehicle_filter_report.csv
+  prepared/per_id_origin_dest.csv
 """
 
 from __future__ import annotations
@@ -18,33 +25,16 @@ from pathlib import Path
 import pandas as pd
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_REPO = _SCRIPT_DIR.parent.parent  # data/<site>/script.py → repo
+_REPO = _SCRIPT_DIR.parent.parent
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 
-from data.filter_calibration_vehicles import vehicle_keep_mask
+from data.filter_calibration_vehicles import tag_ego_vehicles
+from data.site_prep import assign_modal_class, attach_desired_speed, origin_dest_table, snap_to_time_grid
 
 DEFAULT_CSV = _SCRIPT_DIR / "Final_Jounieh.csv"
 DEFAULT_OUT = _SCRIPT_DIR / "prepared"
 TARGET_DT = 0.1
-
-
-def subsample_to_dt(df: pd.DataFrame, target_dt: float) -> pd.DataFrame:
-    """Keep roughly one sample every ``target_dt`` seconds within each vehicle."""
-    parts = []
-    for (_, _), g in df.groupby(["run_id", "id"], sort=False):
-        g = g.sort_values("time")
-        if g.empty:
-            continue
-        t0 = float(g["time"].iloc[0])
-        keep = []
-        next_t = t0
-        for idx, t in zip(g.index, g["time"].to_numpy(float)):
-            if t + 1e-9 >= next_t:
-                keep.append(idx)
-                next_t = t + target_dt
-        parts.append(g.loc[keep])
-    return pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0].copy()
 
 
 def normalize(df: pd.DataFrame, target_dt: float) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -55,11 +45,13 @@ def normalize(df: pd.DataFrame, target_dt: float) -> tuple[pd.DataFrame, pd.Data
     out["lane_kf"] = out["lane_kf_raw"].map(code_map).astype(int)
     out["run_id"] = out["run_id"].astype(int)
     out["class"] = out["class"].astype(float)
-    out = subsample_to_dt(out, target_dt)
+    out = assign_modal_class(out)
+    out = snap_to_time_grid(out, target_dt)
 
     cols = [
         "id",
         "time",
+        "time_raw",
         "xloc_kf",
         "yloc_kf",
         "lane_kf",
@@ -89,23 +81,28 @@ def main() -> None:
     raw = pd.read_csv(args.csv)
     traj, lane_map = normalize(raw, args.target_dt)
     n_before = traj.groupby(["run_id", "id"]).ngroups
-    traj, report = vehicle_keep_mask(traj)
+    traj, report = tag_ego_vehicles(traj)
+    traj = attach_desired_speed(traj)
+    od = origin_dest_table(traj)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     traj_path = args.out_dir / "trajectories_calibration.csv"
     map_path = args.out_dir / "lane_code_map.csv"
     report_path = args.out_dir / "vehicle_filter_report.csv"
+    od_path = args.out_dir / "per_id_origin_dest.csv"
     traj.to_csv(traj_path, index=False)
     lane_map.to_csv(map_path, index=False)
     report.to_csv(report_path, index=False)
+    od.to_csv(od_path, index=False)
+    n_ego = int(report["keep_ego"].sum())
     print(
-        f"Wrote {traj_path} ({len(traj):,} rows, {traj['id'].nunique()} ids; "
-        f"dropped {n_before - int(report['keep'].sum())} vehicles "
-        f"as short/stationary)"
+        f"Wrote {traj_path} ({len(traj):,} rows, {n_before} ids, "
+        f"{n_ego} ego / {n_before - n_ego} scene-only neighbors)"
     )
     print(f"Wrote {map_path}")
     print(f"Wrote {report_path}")
+    print(f"Wrote {od_path}")
     print(lane_map.to_string(index=False))
-    print("Boundaries: use Jounieh_Road_Boundaries.csv (provided). Plot via data/_plot_site_boundaries.py")
+    print("Boundaries: use Jounieh_Road_Boundaries.csv. Plot via data/_plot_site_boundaries.py")
 
 
 if __name__ == "__main__":

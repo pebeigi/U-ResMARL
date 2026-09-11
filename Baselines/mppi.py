@@ -18,6 +18,7 @@ import numpy as np
 
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
+from Baselines.dynamics import goal_approach_control
 from Baselines.dynamics import MAX_STEERING, control_obb_conflict, simulate_bicycle_batch, sanitize_control
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
@@ -169,8 +170,8 @@ class MPPIController(BaseController):
             self._nominal[agent.agent_id] = np.vstack([nominal[1:], nominal[-1:]])
 
             remaining = float(self._dest_s[i]) - float(s_now)
-            if remaining < max(agent.speed * dt * 2.0, 3.0):
-                accel = float(np.clip(-agent.speed / dt, -max_accel, 0.0))
-                steering = 0.0
+            approach = goal_approach_control(agent, scenario, float(self._dest_s[i]))
+            if approach is not None:
+                accel, steering = approach
             controls.append(sanitize_control(i, agent, agents, (accel, steering), scenario))
         return controls

@@ -13,8 +13,16 @@ import numpy as np
 
 import Baselines._paths  # noqa: F401
 from RL.corridor import boundary_reward
-from RL.obs import contact_safety_reward, local_observation
-from utility_model import TrafficAgent, build_step_context, candidate_obb_conflict, kinematic_bicycle_rollout
+from RL.obs import local_observation
+from RL.transition import DEFAULT_REWARD_WEIGHTS, driving_reward
+from utility_model import (
+    TrafficAgent,
+    build_step_context,
+    candidate_obb_conflict,
+    emergency_brake_command,
+    kinematic_bicycle_rollout,
+    sanitize_control_command,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
@@ -48,7 +56,7 @@ def neighbors_of(agents: list[TrafficAgent], idx: int, scenario: "Scenario") -> 
     max_n = int(scenario.sim_config["max_neighbors"])
     ranked: list[tuple[float, int]] = []
     for j, other in enumerate(agents):
-        if j == idx:
+        if j == idx or other.reached_destination:
             continue
         d = float(np.linalg.norm(other.pos - ego.pos))
         if d <= radius:
@@ -59,20 +67,22 @@ def neighbors_of(agents: list[TrafficAgent], idx: int, scenario: "Scenario") -> 
 
 def observation(agents: list[TrafficAgent], idx: int, scenario: "Scenario") -> np.ndarray:
     """Frenet ego state plus body-frame neighbors (shared with residual training)."""
+    dest_s = float(scenario.agents[idx].dest_s) if idx < len(scenario.agents) else None
     return local_observation(
         agents[idx],
         agents,
         neighbors_of(agents, idx, scenario),
         scenario.corridor,
         int(scenario.sim_config["max_neighbors"]),
+        dest_s=dest_s,
     )
 
 
 def observation_dim(scenario: "Scenario") -> int:
-    return 7 + 4 * int(scenario.sim_config["max_neighbors"])
+    from RL.obs import observation_dim as _obs_dim
 
+    return _obs_dim(int(scenario.sim_config["max_neighbors"]))
 
-DEFAULT_REWARD_WEIGHTS = {"progress": 1.0, "safety": 0.5, "smooth": 0.2}
 
 
 def compute_reward(
@@ -82,32 +92,10 @@ def compute_reward(
     control: tuple[float, float],
     weights: dict[str, float] | None = None,
 ) -> float:
-    """Mirror of the RL environment reward (progress / safety / smooth / boundary)."""
-    w = weights or DEFAULT_REWARD_WEIGHTS
-    ego = agents[idx]
-    steering_weight = float(scenario.sim_config.get("steering_penalty_weight", 0.5))
-
-    _, _, tangent, c_lo, c_hi = project_and_clearances(scenario.corridor, ego.pos)
-    tangent_angle = float(np.arctan2(tangent[1], tangent[0]))
-    r_progress = ego.speed * np.cos(ego.heading - tangent_angle)
-
-    length = float(scenario.sim_config.get("vehicle_length", 4.5))
-    r_safety = 0.0
-    for j in neighbors_of(agents, idx, scenario):
-        d_ij = float(np.linalg.norm(agents[j].pos - ego.pos))
-        r_safety += contact_safety_reward(d_ij, length)
-
-    accel, steering = control
-    r_smooth = -(accel**2 + steering_weight * steering**2)
-
-    r_boundary, _ = boundary_reward(c_lo, c_hi)
-
-    return float(
-        w.get("progress", 1.0) * r_progress
-        + w.get("safety", 0.5) * r_safety
-        + w.get("smooth", 0.2) * r_smooth
-        + r_boundary
-    )
+    """Shared pre-transition reward; terminal bonuses are added by advance_agents."""
+    return driving_reward(agents, idx, scenario.corridor, scenario.sim_config,
+                          scenario.agents[idx].dest_s, control, weights,
+                          scenario.sim_config.get("leftover_coef", 0.05))
 
 
 def control_from_bicycle(
@@ -150,9 +138,7 @@ def control_obb_conflict(
 
 def emergency_brake(agent: TrafficAgent, scenario: "Scenario") -> tuple[float, float]:
     """Hard deceleration used when the preferred command fails the OBB filter."""
-    max_accel = float(scenario.sim_config.get("max_accel", 4.0))
-    dt = max(float(scenario.dt), 1e-6)
-    return float(np.clip(-agent.speed / dt, -max_accel, 0.0)), 0.0
+    return emergency_brake_command(agent, scenario.sim_config)
 
 
 def sanitize_control(
@@ -163,15 +149,9 @@ def sanitize_control(
     scenario: "Scenario",
 ) -> tuple[float, float]:
     """Apply the shared closed-loop OBB safety filter to any controller command."""
-    if not scenario.sim_config.get("obb_safety_filter", True):
-        return control
-    accel, steering = control
-    if not control_obb_conflict(agent_idx, agent, agents, accel, steering, scenario):
-        return accel, steering
-    safe = emergency_brake(agent, scenario)
-    if not control_obb_conflict(agent_idx, agent, agents, safe[0], safe[1], scenario):
-        return safe
-    return 0.0, 0.0
+    return sanitize_control_command(
+        agent_idx, agent, agents, control, scenario.sim_config
+    )
 
 
 def lookahead_point(
@@ -261,6 +241,24 @@ def apply_control(
         float(scenario.sim_config.get("destination_threshold", 1.0)),
     )
     return candidate
+
+
+def goal_approach_control(agent: TrafficAgent, scenario: "Scenario", dest_s: float):
+    """Slow near a goal while retaining enough speed to enter its arrival region."""
+    s = float(scenario.corridor.project(agent.pos)[0])
+    remaining = max(float(dest_s) - s, 0.0)
+    if remaining >= max(agent.speed * scenario.dt * 2.0, 3.0):
+        return None
+    tol = float(scenario.sim_config.get("destination_threshold", 1.0))
+    distance = max(remaining - 0.5 * tol, 0.0)
+    max_accel = float(scenario.sim_config.get("max_accel", 4.0))
+    target_speed = min(agent.desired_speed, distance / scenario.dt,
+                       float(np.sqrt(2.0 * max_accel * distance)))
+    velocity = preferred_velocity(agent, scenario, dest_s)
+    norm = float(np.linalg.norm(velocity))
+    if norm > 1e-9:
+        velocity = velocity * target_speed / norm
+    return velocity_to_control(agent, velocity, scenario)
 
 
 def simulate_bicycle_batch(

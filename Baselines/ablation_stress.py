@@ -10,7 +10,7 @@ Minimum ICLR/CoRL ablation package (see ``Baselines.ablation_models``):
   * residual on nominal prior (calibration ablation)
   * full vs. no-lookahead OBB conflict horizon (1.5 s / 4 substeps vs. 1 step)
 
-Default evaluation uses 30 matched scenarios and 5 RL training seeds with paired
+Default evaluation uses 30 matched scenarios and 3 RL training seeds with paired
 bootstrap confidence intervals.
 
     python -m Baselines.ablation_stress
@@ -36,7 +36,7 @@ from Baselines.ablation_models import (
     PAPER_ABLATION_MODELS,
     STRESS_ABLATION_MODELS,
 )
-from Baselines.benchmark import _base_checkpoint
+from Baselines.benchmark import _base_checkpoint, preflight_models
 from Baselines.metrics import aggregate, metrics_frame
 from Baselines.plots import plot_metric_bars, plot_trajectory_grid_frenet
 from Baselines.registry import LABELS, build_controller, controller_kwargs, resolve_train_seeds
@@ -45,7 +45,7 @@ from Baselines.scenario import Scenario, build_scenario
 from Baselines.stats import comparison_frame, summary_frame
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results")
+DEFAULT_OUTPUT = Path("Baselines/results/v2")
 
 STRESS_SPAWN = {
     "spawn_s_range": (20.0, 80.0),
@@ -54,8 +54,8 @@ STRESS_SPAWN = {
 }
 
 _COLLPEN_CHECKPOINTS = {
-    "residual_collpen": Path("RL/checkpoints/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/residual_collpen_dense_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/v2/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"),
 }
 
 STATS_METRICS = (
@@ -72,7 +72,7 @@ def _available_models(models: list[str]) -> list[str]:
     out = []
     for name in models:
         ckpt = _COLLPEN_CHECKPOINTS.get(name)
-        if ckpt is not None and not ckpt.exists():
+        if ckpt is not None and not ckpt.exists() and not list(ckpt.parent.glob(ckpt.stem + "_seed*.pt")):
             print(f"[skip] {name}: {ckpt} not found (train with --collision-penalty first)")
             continue
         out.append(name)
@@ -121,6 +121,7 @@ def _run_suite(
         f"{args.max_steps} steps"
     )
 
+    preflight_models(models, args, scenarios[0])
     results: dict[str, list[RolloutResult]] = {}
     train_seeds: dict[str, list[int]] = {}
     for model in models:
@@ -274,8 +275,8 @@ def main() -> None:
     )
     parser.add_argument("--n-boot", type=int, default=10000, help="Bootstrap resamples for CIs")
     parser.add_argument("--num-agents", type=int, default=10, help="agents for standard ablation")
-    parser.add_argument("--stress-agents", type=int, default=18, help="agents for dense stress")
-    parser.add_argument("--max-steps", type=int, default=300)
+    parser.add_argument("--stress-agents", type=int, default=16, help="agents for dense stress")
+    parser.add_argument("--max-steps", type=int, default=240)
     parser.add_argument("--dt", type=float, default=0.5)
     parser.add_argument("--run-id", type=int, default=DEFAULT_RUN_ID)
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)

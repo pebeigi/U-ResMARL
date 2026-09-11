@@ -77,6 +77,8 @@ def feasible_action_mask(
     """Boolean mask over the fixed (accel, steering) grid with OBB conflict rejection."""
     sim_config = scenario.sim_config
     n = num_grid_actions(sim_config)
+    if not sim_config.get("obb_safety_filter", True):
+        return np.ones(n, dtype=bool)
     mask = np.zeros(n, dtype=bool)
     context = build_step_context(agent_idx, agent, agents, sim_config)
     for k in range(n):

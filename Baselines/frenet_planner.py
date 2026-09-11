@@ -18,6 +18,7 @@ import numpy as np
 
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
+from Baselines.dynamics import goal_approach_control
 from Baselines.dynamics import velocity_to_control, wrap_angle
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
@@ -163,8 +164,9 @@ class FrenetPlannerController(BaseController):
 
             dest_s = float(self._dest_s[i])
             remaining = dest_s - float(s0)
-            if remaining < max(speed * dt * 2.0, 3.0):
-                controls.append((float(np.clip(-speed / dt, -self.max_accel, 0.0)), 0.0))
+            approach = goal_approach_control(agent, scenario, dest_s)
+            if approach is not None:
+                controls.append(approach)
                 continue
 
             target_speed = np.clip(

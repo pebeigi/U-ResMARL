@@ -25,7 +25,7 @@ from RL.calibration_io import RESIDUAL_PARAM_KEYS
 
 try:
     import torch
-    from RL.train_ppo import TorchResidualPolicy
+    from RL.train_ppo import TorchResidualPolicy, action_space_from_blob, residual_mode_from_blob
 except ImportError:
     torch = None
     TorchResidualPolicy = None
@@ -77,15 +77,8 @@ def load_policy(checkpoint: Path) -> Any | None:
         payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
     except TypeError:
         payload = torch.load(checkpoint, map_location="cpu")
-    policy = TorchResidualPolicy(
-        payload["obs_dim"],
-        hidden_dim=payload["hidden_dim"],
-        residual_scales=payload.get("residual_scales"),
-        highway_length=float(payload.get("highway_length", 500.0)),
-    )
-    policy.load_state_dict(payload["state_dict"], strict=False)
-    policy.eval()
-    return policy
+    from Baselines.residual_marl import load_residual_policy
+    return load_residual_policy(checkpoint, int(payload["obs_dim"]), allow_legacy=True)
 
 
 def record_rollout(
@@ -94,6 +87,8 @@ def record_rollout(
     explore_std: float = 0.0,
 ) -> dict[str, Any]:
     """Run one episode and record positions, velocities, headings, and residuals."""
+    if policy is not None:
+        env.config.residual_mode = policy.residual_mode
     obs_list = env.reset()
     n_agents = len(env.agents)
     positions: list[list[np.ndarray]] = [[] for _ in range(n_agents)]
@@ -129,7 +124,13 @@ def record_rollout(
             headings[i].append(float(env.agents[i].heading))
             controls[i].append(dict(env.agents[i].prev_control))
             if residual_actions is not None:
-                residuals[i].append(dict(residual_actions[i]))
+                action = residual_actions[i]
+                if isinstance(action, dict):
+                    residuals[i].append(dict(action))
+                else:
+                    residuals[i].append(
+                        {f"c{j}": float(v) for j, v in enumerate(np.asarray(action).ravel())}
+                    )
             else:
                 residuals[i].append({})
 
@@ -269,30 +270,37 @@ def plot_control_profiles(baseline: dict[str, Any], residual: dict[str, Any] | N
     plt.close(fig)
 
 
+def residual_series_matrix(series):
+    """Return the actual emitted coordinates instead of silently plotting zeros."""
+    present = {key for delta in series for key in delta if isinstance(delta, dict)}
+    if present and all(key.startswith("c") and key[1:].isdigit() for key in present):
+        keys = sorted(present, key=lambda key: int(key[1:]))
+    else:
+        keys = [key for key in RESIDUAL_PARAM_KEYS if key in present]
+        keys += sorted(present - set(keys))
+    matrix = np.array([[abs(float(delta.get(key, 0.0))) for delta in series[1:]] for key in keys])
+    return keys, matrix
+
+
 def plot_residual_heatmap(residual: dict[str, Any], output_path: Path) -> None:
     """Heatmap of |dTheta| components over time per agent."""
     n_agents = len(residual["residuals"])
-    keys = list(RESIDUAL_PARAM_KEYS)
     fig, axes = plt.subplots(n_agents, 1, figsize=(11, 2.8 * n_agents), constrained_layout=True)
     if n_agents == 1:
         axes = [axes]
 
     for i, ax in enumerate(axes):
         series = residual["residuals"][i]
-        mat = np.zeros((len(keys), max(len(series) - 1, 1)))
-        for t, delta in enumerate(series[1:], start=0):
-            for k, key in enumerate(keys):
-                if isinstance(delta, dict):
-                    mat[k, t] = abs(delta.get(key, 0.0))
-                else:
-                    mat[k, t] = abs(float(np.asarray(delta).reshape(-1)[k]))
-
+        keys, mat = residual_series_matrix(series)
+        if not keys or mat.size == 0:
+            ax.set_visible(False)
+            continue
         im = ax.imshow(mat, aspect="auto", cmap="coolwarm", origin="lower")
         ax.set_yticks(range(len(keys)))
         ax.set_yticklabels(keys, fontsize=9)
         ax.set_xlabel("Step")
-        ax.set_title(f"Agent {i}: utility parameter residuals")
-        fig.colorbar(im, ax=ax, label="|dTheta|")
+        ax.set_title(f"Agent {i}: emitted residuals")
+        fig.colorbar(im, ax=ax, label="|residual|")
 
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
@@ -367,11 +375,11 @@ def main() -> None:
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
     parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
-    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/residual_policy.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/v2/residual_policy.pt"))
     parser.add_argument(
         "--rllib-checkpoint",
         type=Path,
-        default=Path("RL/checkpoints/rllib_ppo/checkpoint_final"),
+        default=Path("RL/checkpoints/v2/rllib_ppo/checkpoint_final"),
         help="RLlib checkpoint directory (preferred if it exists)",
     )
     parser.add_argument("--no-gif", action="store_true", help="Skip GIF animation export")

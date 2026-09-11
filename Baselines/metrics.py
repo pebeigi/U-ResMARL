@@ -53,6 +53,9 @@ def _pairwise_ttc(
                 for cj in range(2):
                     rel_p = centres[j, cj] - centres[i, ci]
                     min_gap = min(min_gap, float(np.linalg.norm(rel_p)) - combined)
+                    if float(rel_p @ rel_p) <= combined * combined:
+                        pair_ttc = 0.0
+                        continue
                     if a_q < 1e-9:
                         continue
                     b_q = 2.0 * float(rel_p @ rel_v)
@@ -90,7 +93,7 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
         velocities[1:] = (result.positions[1:] - result.positions[:-1]) / dt
         velocities[0] = velocities[1]
 
-    active_steps = int(active[1 : steps + 1].sum()) if steps > 0 else 0
+    active_steps = int(active[:steps].sum()) if steps > 0 else 0
     active_steps = max(active_steps, 1)
 
     speeds = result.speeds[1 : steps + 1]
@@ -101,7 +104,7 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
     accel_vals = accels[mask[: accels.shape[0]]] if accels.size else np.array([0.0])
     if accels.shape[0] > 1:
         jerk = np.diff(accels, axis=0) / dt
-        jerk_vals = jerk[mask[: jerk.shape[0]]] if jerk.size else np.array([0.0])
+        jerk_vals = jerk[(active[:-2] & active[1:-1] & active[2:])[:jerk.shape[0]]] if jerk.size else np.array([0.0])
     else:
         jerk_vals = np.array([0.0])
     steer_vals = result.steerings[mask[: result.steerings.shape[0]]] if result.steerings.size else np.array([0.0])
@@ -112,7 +115,7 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
     min_gaps, min_ttcs, unsafe_total, pair_total = [], [], 0, 0
     for t in range(1, steps + 1):
         centres = _disc_centres(result.positions[t], result.headings[t], result.vehicle_length)
-        gap, ttc, unsafe, pairs = _pairwise_ttc(centres, velocities[t], active[t], disc_radius)
+        gap, ttc, unsafe, pairs = _pairwise_ttc(centres, velocities[t], active[t - 1], disc_radius)
         if np.isfinite(gap):
             min_gaps.append(gap)
         if np.isfinite(ttc):

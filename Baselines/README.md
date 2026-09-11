@@ -1,17 +1,50 @@
 # Baselines — benchmarking suite
 
-Comparison models for the residual MARL paper. This package **imports** the `RL/`
-package read-only and never modifies it.
+Comparison models for the residual RL paper on **closed-loop multi-agent
+trajectory simulation**. This package **imports** the `RL/` package and evaluates
+every controller on identical scenarios with identical bicycle dynamics and
+metrics.
 
-The paper promises comparisons against deterministic interaction models (ORCA),
-stochastic utility-based models (prospect theory), self-driven particle
-formulations, and purely learning-based RL without behavioural priors. This
-folder implements all of them, plus three classical robotic trajectory-generation
-planners and three modern cooperative-MARL baselines, and evaluates every model
-on identical scenarios with identical dynamics and metrics.
+The method adapts a calibrated discrete utility controller with a learned
+residual. The shared conflict filter can reduce collisions; it does not guarantee
+collision-free motion. Safety and performance claims require the corrected runs.
 
-Every model here is two-dimensional: it decides both longitudinal and lateral
-motion. Pure car-following models are out of scope for a lane-free corridor.
+## Corrected experiment protocol (v2)
+
+Historical checkpoints and results are preserved. They predate fixes to the
+simulation and learning targets and must not be used for new comparisons.
+New checkpoints go to `RL/checkpoints/v2/` and `Baselines/checkpoints/v2/`;
+new results go to `Baselines/results/v2/`. Evaluation rejects incompatible
+checkpoints and requires every requested training seed.
+
+Training and evaluation share synchronous movement, pre-transition driving
+rewards, arrival bonuses, and collision accounting in `RL/transition.py`.
+PPO returns follow each agent separately, terminate on arrival, and bootstrap
+at time limits. The paper trainers use collision penalty 8, filter off during
+training, filter on for validation and evaluation, and safety-first checkpoint
+selection on held-out validation scenarios. Test scores do not select weights.
+The legacy continuous baseline defaults to collision penalty 0; set it explicitly
+when making a reward-matched comparison.
+
+`residual_param` trains a separate parameter-residual policy. Its weights-only
+and sigma-only variants mask that policy at inference: these measure sensitivity
+to removing learned residual components, not separately retrained architectures.
+`residual_nominal` is trained independently with the nominal prior. Parameter
+masks on candidate-logit checkpoints raise an error instead of reporting a no-op.
+
+From the repository root, the corrected paper workflow is:
+
+```bash
+python -m Baselines.paper_rerun status
+python -m Baselines.paper_rerun train --jobs 1
+python -m Baselines.paper_rerun eval
+python -m Baselines.paper_figures --all
+```
+
+This trains five families across seeds 0, 1, and 2. The short regression/smoke
+checks validate implementation only; full retraining and evaluation remain
+necessary before interpreting policy performance. Metric bar error bars show
+standard deviations; bootstrap intervals are in the statistics CSV and CI table.
 
 ## Design
 
@@ -23,7 +56,7 @@ shared:
 | Initial conditions (positions, speeds, destinations) | `scenario.py` — generated once per seed from `RL.traffic_env` spawn logic |
 | Kinematic bicycle integrator, observations, reward | `dynamics.py` |
 | Rollout loop, oriented-box collisions, arrival rule | `runner.py` |
-| Shared OBB safety filter (1.5 s / 4-substep lookahead) | `dynamics.sanitize_control` — applied to **every** controller in `runner.py` |
+| Shared OBB safety filter (1.5 s / 4-substep lookahead) | `utility_model.sanitize_control_command` via `RL.transition.advance_agents` — applied to **every** controller in `runner.py` at evaluation; off during training by default |
 | Safety / efficiency / comfort metrics | `metrics.py` |
 | Distributional realism vs. measured data | `realism.py` |
 
@@ -36,23 +69,24 @@ def compute_controls(self, agents, scenario, step) -> list[tuple[float, float]]:
 
 ## Models
 
-### Matched direct discrete RL (isolates utility-parameter learning)
+### Matched direct discrete RL (isolates the utility structure)
 
-The reviewer's requested controlled comparison is `direct_discrete_rl` vs.
-`residual_marl`. Both use the same observations, reward, bicycle candidates,
-and OBB conflict rejection; only the action parameterization differs:
+The controlled comparison is `direct_discrete_rl` vs. `residual_marl`. Both use
+the same observations, reward, bicycle candidates, and OBB conflict rejection;
+only the action parameterization differs:
 
 | Model | Policy output | Action selection |
 | --- | --- | --- |
 | `direct_discrete_rl` | logits over the 7×9 `(accel, δ)` grid | masked categorical sample |
-| `residual_marl` | `ΔΘ` on utility parameters | `argmax_a U(a; Θ_base + ΔΘ)` |
+| `residual_marl` (default) | additive residual on the same discrete utilities | `argmax_a [U(a; Θ_base) + Δ(a)]` |
+| `residual_marl` (`--residual-mode param_delta`) | `ΔΘ` on utility parameters (ablation) | `argmax_a U(a; gauge(Θ_base, ΔΘ))` |
 
 Train (defaults match residual: 240 steps, collision penalty 8):
 
 ```bash
 python -m Baselines.train_direct_discrete_rl --updates 100 --collision-penalty 8
-python -m Baselines.train_seeds --model direct_discrete_rl --seeds 0 1 2 3 4 \
-    -- --updates 100 --collision-penalty 8
+python -m Baselines.train_seeds --model residual_marl --seeds 0 1 2 --overwrite -- \
+    --updates 100 --collision-penalty 8 --residual-mode candidate_logits
 ```
 
 `pure_rl` remains as a **legacy** continuous-Gaussian IPPO baseline (different
@@ -87,8 +121,8 @@ forbids the side-by-side passing that a lane-free corridor is full of.
 | `mappo` | `marl.py` | MAPPO (Yu et al., NeurIPS 2022): shared actor, centralised critic on the joint corridor state, simultaneous PPO-clip updates. |
 | `happo` | `marl.py` | HAPPO (Kuba et al., ICLR 2022): one actor per agent, centralised critic, sequential updates in a random agent order with the multi-agent advantage factor that makes the scheme monotonic. |
 | `hatrpo` | `marl.py` | HATRPO (Kuba et al., ICLR 2022): the same sequential scheme with a KL trust region per agent — conjugate-gradient natural gradient plus a backtracking line search — instead of clipping. |
-| `utility_pt` | `utility_prior.py` | The calibrated prospect-theory utility model with no learning (`temperature=0` gives the deterministic argmax; `utility_pt_logit` samples from a logit choice model over the candidate set). |
-| `residual_marl` | `residual_marl.py` | The proposed model: the same utility prior with a learned residual `ΔΘ_i(o_i)` from `RL/train_ppo.py`. The residual now also modulates the collision-kernel scales `sigma_long` / `sigma_lat` (vehicle half-extents by default), so avoidance has support at car size rather than a 0.5 m point-mass kernel. |
+| `utility_pt` | `utility_prior.py` | Calibrated discrete utility controller (additive one-step planner) with no learning (`temperature=0` gives the deterministic argmax; `utility_pt_logit` samples from a logit choice model over the candidate set). |
+| `residual_marl` | `residual_marl.py` | The proposed model: same utility controller plus a learned residual. Default residual is an additive bias on the discrete candidate utilities (continuous credit); `--residual-mode param_delta` restores the older Θ residual for ablations. |
 
 The four RL baselines share the actor architecture, the observation and the
 reward, so the comparison isolates the algorithm:
@@ -156,7 +190,7 @@ Run with 30 scenarios, 5 training seeds, paired bootstrap CIs, and both
 full-lookahead (`1.5 s / 4 substeps`) and no-lookahead (`1 step`) suites:
 
 ```bash
-python -m Baselines.ablation_stress --lookahead both --train-seeds 0 1 2 3 4
+python -m Baselines.ablation_stress --lookahead both --train-seeds 0 1 2
 python -m Baselines.paper_rerun eval
 ```
 
@@ -184,10 +218,10 @@ python -m Baselines.paper_rerun eval
 Or train individual models:
 
 ```bash
-python -m Baselines.train_seeds --model mappo --seeds 0 1 2 3 4 \
-    -- --updates 80 --max-steps 240 --collision-penalty 8
+python -m Baselines.train_seeds --model mappo --seeds 0 1 2 \
+    -- --updates 100 --max-steps 240 --collision-penalty 8
 
-python -m Baselines.train_seeds --model residual_collpen_dense --seeds 0 1 2 3 4 \
+python -m Baselines.train_seeds --model residual_collpen_dense --seeds 0 1 2 \
     -- --updates 100 --num-agents 16 --collision-penalty 5 --dense-spawn --max-steps 240
 ```
 
@@ -201,12 +235,12 @@ Useful flags:
 
 - `--models orca social_force dwa mppi frenet pure_rl mappo happo hatrpo utility_pt residual_marl` — subset to run
 - `--run-id 2 --lane-kf 1` — which measured corridor to simulate on
-- `--train-seeds 0 1 2 3 4` — evaluate per-seed checkpoints; bootstrap CIs over training seeds
+- `--train-seeds 0 1 2` — evaluate per-seed checkpoints; bootstrap CIs over training seeds
 - `--no-obb-safety-filter` — disable shared closed-loop OBB filter (fairness ablation)
 - `--residual-checkpoint`, `--pure-rl-checkpoint`, `--checkpoint-dir` — override checkpoint paths
 - `--no-realism`, `--no-figures` — skip the data-distribution metrics / plots
 
-Outputs land in `Baselines/results/`:
+Outputs land in `Baselines/results/v2/`:
 
 - `benchmark_raw.csv` — one row per (model, scenario)
 - `benchmark_summary.csv` — mean and standard deviation per model

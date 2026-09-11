@@ -36,116 +36,12 @@ except ImportError as exc:  # pragma: no cover
     raise SystemExit("PyTorch is required for training. Install with: pip install torch") from exc
 
 
-@dataclass
-class PPOMemory:
-    observations: list = field(default_factory=list)
-    actions: list = field(default_factory=list)
-    masks: list = field(default_factory=list)
-    log_probs: list = field(default_factory=list)
-    values: list = field(default_factory=list)
-    rewards: list = field(default_factory=list)
-    dones: list = field(default_factory=list)
+from Baselines.training import PPOMemory, collect_episode, PolicySelection, add_validation_args
+from RL.train_ppo import compute_gae, compute_gae_by_trajectory
 
 
-def run_episode(
-    scenario: Scenario,
-    policy: DirectDiscretePolicy,
-    memory: PPOMemory,
-    collision_penalty: float = 0.0,
-) -> dict[str, float]:
-    agents = scenario.spawn_agents()
-    dest_s = np.array([a.dest_s for a in scenario.agents], dtype=float)
-    tol = float(scenario.sim_config.get("destination_threshold", 1.0))
-    length = scenario.vehicle_length
-    width = scenario.vehicle_width
-    n = len(agents)
-
-    total_reward = 0.0
-    collisions = 0
-    steps = 0
-
-    for step in range(scenario.max_steps):
-        active = [i for i, a in enumerate(agents) if not a.reached_destination]
-        if not active:
-            break
-
-        reward_slots: list[int] = []
-        controls: dict[int, tuple[float, float]] = {}
-        for i in active:
-            mask = feasible_action_mask(i, agents[i], agents, scenario)
-            obs = observation(agents, i, scenario)
-            action_idx, log_prob, value = policy.sample_action(obs, mask)
-            memory.observations.append(obs)
-            memory.actions.append(action_idx)
-            memory.masks.append(mask.astype(np.bool_))
-            memory.log_probs.append(log_prob)
-            memory.values.append(value)
-            reward_slots.append(i)
-            controls[i] = grid_control(action_idx, scenario.sim_config)
-
-        for i in active:
-            apply_control(agents[i], controls[i], scenario)
-
-        for i in active:
-            s, _, _, _, _ = scenario.corridor.project(agents[i].pos)
-            if s >= dest_s[i] - tol:
-                agents[i].reached_destination = True
-                hold_still(agents[i])
-
-        hit: set[int] = set()
-        for a_idx in range(n):
-            if agents[a_idx].reached_destination:
-                continue
-            for b_idx in range(a_idx + 1, n):
-                if agents[b_idx].reached_destination:
-                    continue
-                if boxes_overlap(
-                    agents[a_idx].pos,
-                    agents[a_idx].heading,
-                    agents[b_idx].pos,
-                    agents[b_idx].heading,
-                    length=length,
-                    width=width,
-                ):
-                    hit.update((a_idx, b_idx))
-        collisions += len(hit)
-
-        steps = step + 1
-        done = all(a.reached_destination for a in agents) or steps >= scenario.max_steps
-        for i in reward_slots:
-            r = compute_reward(agents, i, scenario, controls[i], DEFAULT_REWARD_WEIGHTS)
-            if collision_penalty and i in hit:
-                r -= collision_penalty
-            memory.rewards.append(float(r))
-            memory.dones.append(float(done))
-            total_reward += float(r)
-
-    arrived = sum(a.reached_destination for a in agents)
-    return {
-        "reward": total_reward / max(n, 1),
-        "collisions": float(collisions),
-        "arrival_rate": arrived / max(n, 1),
-        "steps": float(steps),
-    }
-
-
-def compute_gae(
-    rewards: np.ndarray,
-    values: np.ndarray,
-    dones: np.ndarray,
-    gamma: float,
-    gae_lambda: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    advantages = np.zeros_like(rewards, dtype=np.float32)
-    last_gae = 0.0
-    next_value = 0.0
-    for t in reversed(range(len(rewards))):
-        nonterminal = 1.0 - dones[t]
-        delta = rewards[t] + gamma * next_value * nonterminal - values[t]
-        last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
-        advantages[t] = last_gae
-        next_value = values[t]
-    return advantages, advantages + values
+def run_episode(scenario, policy, memory, collision_penalty=0.0):
+    return collect_episode(scenario, policy, memory, collision_penalty, discrete=True)
 
 
 def ppo_update(
@@ -162,17 +58,22 @@ def ppo_update(
     rewards_np = np.array(memory.rewards, dtype=np.float32)
     dones_np = np.array(memory.dones, dtype=np.float32)
 
-    advantages_np, returns_np = compute_gae(
-        rewards_np, values_np, dones_np, args.gamma, args.gae_lambda
+    advantages_np, returns_np = compute_gae_by_trajectory(
+        rewards_np, values_np, np.asarray(memory.traj_ids), args.gamma, args.gae_lambda,
+        dones=dones_np, timeouts=np.asarray(memory.timeouts),
+        bootstrap_values=np.asarray(memory.bootstrap_values),
     )
     advantages = torch.as_tensor(advantages_np, dtype=torch.float32)
     returns = torch.as_tensor(returns_np, dtype=torch.float32)
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    advantages = (advantages - advantages.mean()) / (advantages.std(unbiased=False) + 1e-8)
 
+    policy.update_value_stats(returns)
+    targets = policy.normalize_return(returns)
     n = obs.shape[0]
     indices = np.arange(n)
     stats = {"loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
     for _ in range(args.ppo_epochs):
+        epoch_kl = []
         np.random.shuffle(indices)
         for start in range(0, n, args.minibatch_size):
             batch = indices[start : start + args.minibatch_size]
@@ -184,13 +85,14 @@ def ppo_update(
             unclipped = ratio * advantages[batch]
             clipped = torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef) * advantages[batch]
             policy_loss = -torch.min(unclipped, clipped).mean()
-            value_loss = 0.5 * (returns[batch] - value).pow(2).mean()
+            value_loss = 0.5 * (targets[batch] - policy.normalize_return(value)).pow(2).mean()
             loss = policy_loss + args.value_coef * value_loss - args.entropy_coef * entropy
 
             optimizer.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(policy.parameters(), max_norm=0.5)
             optimizer.step()
+            epoch_kl.append(float(((ratio - 1.0) - (new_log_probs - old_log_probs[batch])).mean().detach()))
 
             stats = {
                 "loss": float(loss.detach()),
@@ -198,11 +100,14 @@ def ppo_update(
                 "value_loss": float(value_loss.detach()),
                 "entropy": float(entropy.detach()),
             }
+        if getattr(args, "target_kl", 0.02) > 0 and np.mean(epoch_kl) > getattr(args, "target_kl", 0.02):
+            break
     return stats
 
 
 def train(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     rng = np.random.default_rng(args.seed)
 
     probe = build_scenario(
@@ -211,6 +116,7 @@ def train(args: argparse.Namespace) -> None:
         max_steps=args.max_steps,
         run_id=args.run_id,
         lane_kf=args.lane_kf,
+                obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
     )
     num_actions = num_grid_actions(probe.sim_config)
     policy = DirectDiscretePolicy(
@@ -221,23 +127,29 @@ def train(args: argparse.Namespace) -> None:
     )
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
 
+    selection = PolicySelection(args, policy, "direct_discrete_rl")
     best_reward = -float("inf")
     for update in range(1, args.updates + 1):
+        if getattr(args, "anneal_lr", True):
+            for group in optimizer.param_groups:
+                group["lr"] = args.lr * (1.0 - (update - 1) / max(args.updates, 1))
         memory = PPOMemory()
         episode_stats: list[dict[str, float]] = []
         for _ in range(args.episodes_per_update):
             scenario = build_scenario(
-                seed=int(rng.integers(0, 1_000_000)),
+                seed=int(rng.integers(10_000_000, 2_000_000_000)),
                 num_agents=args.num_agents,
                 max_steps=args.max_steps,
                 run_id=args.run_id,
                 lane_kf=args.lane_kf,
+                obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
             )
             episode_stats.append(
                 run_episode(scenario, policy, memory, collision_penalty=args.collision_penalty)
             )
 
         stats = ppo_update(policy, optimizer, memory, args)
+        selection.consider(update)
         mean_reward = float(np.mean([s["reward"] for s in episode_stats]))
         best_reward = max(best_reward, mean_reward)
         if update == 1 or update % max(args.log_every, 1) == 0:
@@ -249,10 +161,13 @@ def train(args: argparse.Namespace) -> None:
                 f"entropy={stats['entropy']:6.3f}"
             )
 
+    selection_meta = selection.finish()
     if args.save is not None:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
+                "protocol_version": 2,
+                **selection_meta,
                 "state_dict": policy.state_dict(),
                 "obs_dim": policy.obs_dim,
                 "num_actions": policy.num_actions,
@@ -284,7 +199,7 @@ def main() -> None:
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
-    parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--entropy-coef", type=float, default=0.0)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--hidden-dim", type=int, default=128)
@@ -294,8 +209,12 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("Baselines/checkpoints/direct_discrete_policy.pt"),
+        default=Path("Baselines/checkpoints/v2/direct_discrete_policy.pt"),
     )
+    parser.add_argument("--target-kl", type=float, default=0.02)
+    parser.add_argument("--no-anneal-lr", dest="anneal_lr", action="store_false")
+    add_validation_args(parser)
+    parser.add_argument("--train-obb-filter", action="store_true")
     train(parser.parse_args())
 
 

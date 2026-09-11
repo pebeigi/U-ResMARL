@@ -35,6 +35,9 @@ from Baselines.marl import (
     save_marl_policy,
 )
 from Baselines.scenario import Scenario, build_scenario
+from RL.transition import advance_agents
+from Baselines.training import PolicySelection, add_validation_args
+from RL.train_ppo import compute_gae
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID, boxes_overlap
 
 try:
@@ -56,6 +59,8 @@ class Episode:
     rewards: np.ndarray
     masks: np.ndarray
     stats: dict = field(default_factory=dict)
+    bootstrap_values: np.ndarray | None = None
+    truncated: np.ndarray | None = None  # Per-agent horizon ends, excluding arrivals.
 
 
 def collect_episode(
@@ -109,38 +114,13 @@ def collect_episode(
             step_mask[i] = 1.0
             controls[i] = policy.to_control(action)
 
-        for i in controls:
-            apply_control(agents[i], controls[i], scenario)
-
-        for i in controls:
-            station, _, _, _, _ = scenario.corridor.project(agents[i].pos)
-            if station >= dest_s[i] - tol:
-                agents[i].reached_destination = True
-                hold_still(agents[i])
-
-        hit: set[int] = set()
-        for a_idx in range(n):
-            if agents[a_idx].reached_destination:
-                continue
-            for b_idx in range(a_idx + 1, n):
-                if agents[b_idx].reached_destination:
-                    continue
-                if boxes_overlap(
-                    agents[a_idx].pos,
-                    agents[a_idx].heading,
-                    agents[b_idx].pos,
-                    agents[b_idx].heading,
-                    length=length,
-                    width=width,
-                ):
-                    hit.update((a_idx, b_idx))
-        collisions += len(hit)
-
-        for i in controls:
-            reward = compute_reward(agents, i, scenario, controls[i], DEFAULT_REWARD_WEIGHTS)
-            if collision_penalty and i in hit:
-                reward -= collision_penalty
-            step_reward[i] = reward
+        transition = advance_agents(
+            agents, [controls.get(i, (0.0, 0.0)) for i in range(n)],
+            scenario.corridor, scenario.sim_config, dest_s,
+            collision_penalty=collision_penalty,
+        )
+        collisions += len(transition.collision_pairs)
+        step_reward[:] = transition.rewards
 
         obs_buf.append(step_obs)
         state_buf.append(step_state)
@@ -151,6 +131,17 @@ def collect_episode(
         mask_buf.append(step_mask)
         steps = step + 1
 
+    bootstrap = np.zeros(n, dtype=np.float32)
+    truncated = np.zeros(n, dtype=bool)
+    if steps >= scenario.max_steps:
+        features = agent_features(agents, scenario)
+        for i, agent in enumerate(agents):
+            if not agent.reached_destination:
+                truncated[i] = True
+                obs = observation(agents, i, scenario)
+                state = centralised_state(features, obs, policy.num_agents) if policy.centralised else obs
+                with torch.no_grad():
+                    bootstrap[i] = float(policy.value(torch.as_tensor(state, dtype=torch.float32)))
     arrived = sum(a.reached_destination for a in agents)
     return Episode(
         obs=np.asarray(obs_buf),
@@ -160,6 +151,8 @@ def collect_episode(
         values=np.asarray(value_buf),
         rewards=np.asarray(reward_buf),
         masks=np.asarray(mask_buf),
+        bootstrap_values=bootstrap,
+        truncated=truncated,
         stats={
             "reward": float(np.sum(reward_buf) / max(n, 1)),
             "collisions": float(collisions),
@@ -171,21 +164,25 @@ def collect_episode(
 
 def episode_gae(episode: Episode, gamma: float, gae_lambda: float) -> tuple[np.ndarray, np.ndarray]:
     """GAE per agent along the time axis, ignoring steps where the agent is done."""
-    rewards = episode.rewards
-    values = episode.values
-    masks = episode.masks
-    steps, n = rewards.shape
-    advantages = np.zeros_like(rewards)
-    last_gae = np.zeros(n)
-    next_value = np.zeros(n)
-    for t in reversed(range(steps)):
-        active = masks[t]
-        delta = rewards[t] + gamma * next_value - values[t]
-        last_gae = delta + gamma * gae_lambda * last_gae
-        advantages[t] = last_gae * active
-        next_value = np.where(active > 0, values[t], next_value)
-        last_gae = last_gae * active
-    return advantages, advantages + values
+    advantages = np.zeros_like(episode.rewards)
+    returns = np.zeros_like(episode.rewards)
+    for i in range(episode.rewards.shape[1]):
+        idx = np.flatnonzero(episode.masks[:, i])
+        if not len(idx):
+            continue
+        dones = np.zeros(len(idx), dtype=np.float32)
+        dones[-1] = 1.0
+        timeouts = np.zeros_like(dones)
+        boot = np.zeros_like(dones)
+        if episode.truncated is not None and episode.truncated[i]:
+            if episode.bootstrap_values is None or idx[-1] != len(episode.rewards) - 1:
+                raise ValueError("Truncated agents require a final-step bootstrap value")
+            timeouts[-1] = 1.0
+            boot[-1] = episode.bootstrap_values[i]
+        advantages[idx, i], returns[idx, i] = compute_gae(
+            episode.rewards[idx, i], episode.values[idx, i], dones, gamma, gae_lambda,
+            timeouts=timeouts, bootstrap_values=boot)
+    return advantages, returns
 
 
 @dataclass
@@ -440,7 +437,7 @@ def update_actors_hatrpo(
 
         with torch.no_grad():
             old_mean = actor(obs).detach()
-            old_log_std = actor.log_std.detach().expand_as(old_mean)
+            old_log_std = actor.log_std.detach().clone().expand_as(old_mean)
 
         def surrogate() -> torch.Tensor:
             dist = torch.distributions.Normal(actor(obs), torch.exp(actor.log_std).expand_as(old_mean))
@@ -506,6 +503,7 @@ def train(args: argparse.Namespace) -> None:
         max_steps=args.max_steps,
         run_id=args.run_id,
         lane_kf=args.lane_kf,
+                    obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
     )
     policy = MARLPolicy(
         obs_dim=observation_dim(probe),
@@ -528,18 +526,19 @@ def train(args: argparse.Namespace) -> None:
         f"state_dim={policy.state_dim} | agents={args.num_agents}"
     )
 
+    selection = PolicySelection(args, policy, args.algo)
     best_reward = -float("inf")
     best_collisions = float("inf")
-    best_state = None
     for update in range(1, args.updates + 1):
         episodes = [
             collect_episode(
                 build_scenario(
-                    seed=int(rng.integers(0, 1_000_000)),
+                    seed=int(rng.integers(10_000_000, 2_000_000_000)),
                     num_agents=args.num_agents,
                     max_steps=args.max_steps,
                     run_id=args.run_id,
                     lane_kf=args.lane_kf,
+                    obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
                 ),
                 policy,
                 collision_penalty=args.collision_penalty,
@@ -564,14 +563,9 @@ def train(args: argparse.Namespace) -> None:
 
         mean_reward = float(np.mean([e.stats["reward"] for e in episodes]))
         mean_collisions = float(np.mean([e.stats["collisions"] for e in episodes]))
-        if mean_collisions < best_collisions or (
-            mean_collisions == best_collisions and mean_reward >= best_reward
-        ):
-            best_collisions = mean_collisions
-            best_reward = mean_reward
-            best_state = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items()}
-        else:
-            best_reward = max(best_reward, mean_reward)
+        best_reward = max(best_reward, mean_reward)
+        best_collisions = min(best_collisions, mean_collisions)
+        selection.consider(update)
         if update == 1 or update % max(args.log_every, 1) == 0:
             print(
                 f"Update {update:4d}/{args.updates} | reward={mean_reward:9.3f} | "
@@ -582,13 +576,13 @@ def train(args: argparse.Namespace) -> None:
                 + " | ".join(f"{k}={v:7.3f}" for k, v in stats.items())
             )
 
+    selection_meta = selection.finish()
     if args.save is not None:
-        if best_state is not None:
-            policy.load_state_dict(best_state)
         save_marl_policy(
             policy,
             args.save,
             extra={
+                **selection_meta,
                 "run_id": args.run_id,
                 "lane_kf": args.lane_kf,
                 "updates": args.updates,
@@ -598,7 +592,7 @@ def train(args: argparse.Namespace) -> None:
         )
         print(
             f"Saved {args.algo} policy to {args.save} "
-            f"(best train collisions={best_collisions:.2f})"
+            f"(selected validation update={selection.selected_update})"
         )
 
 
@@ -632,9 +626,11 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--save", type=Path, default=None)
+    add_validation_args(parser)
+    parser.add_argument("--train-obb-filter", action="store_true")
     args = parser.parse_args()
     if args.save is None:
-        args.save = Path(f"Baselines/checkpoints/{args.algo}_policy.pt")
+        args.save = Path(f"Baselines/checkpoints/v2/{args.algo}_policy.pt")
     args.max_kl = torch.tensor(float(args.max_kl))
     train(args)
 

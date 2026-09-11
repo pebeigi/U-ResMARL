@@ -26,7 +26,44 @@ from Baselines.runner import RolloutResult, rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results")
+DEFAULT_OUTPUT = Path("Baselines/results/v2")
+
+
+def preflight_models(models, args, scenario):
+    """Load every requested checkpoint before spending time on rollouts."""
+    for model in models:
+        for train_seed, checkpoint in resolve_train_seeds(
+            model, args.train_seeds, base=_base_checkpoint(model, args)
+        ):
+            controller = build_controller(model, **controller_kwargs(
+                model, residual_checkpoint=args.residual_checkpoint,
+                pure_rl_checkpoint=getattr(args, "pure_rl_checkpoint", None),
+                calibration=args.calibration, checkpoint_dir=args.checkpoint_dir,
+                checkpoint_override=checkpoint if train_seed >= 0 else None,
+            ))
+            controller.reset(scenario)
+
+
+def _attach_realism_metrics(frame: pd.DataFrame, realism: pd.DataFrame) -> pd.DataFrame:
+    """Attach rollout-level realism metrics without a many-to-many key merge.
+
+    ``model`` and scenario ``seed`` are not unique when several training seeds
+    are evaluated.  ``realism_frame`` receives the same flattened rollout list
+    as ``metrics_frame``, so rows must be joined by that shared order.
+    """
+    left = frame.reset_index(drop=True)
+    right = realism.reset_index(drop=True)
+    if len(left) != len(right):
+        raise ValueError(
+            f"Realism row count ({len(right)}) does not match benchmark row count ({len(left)})"
+        )
+    keys = ["model", "seed"]
+    if not left[keys].equals(right[keys]):
+        raise ValueError("Realism rows are not aligned with benchmark rollout order")
+    overlap = (set(left.columns) & set(right.columns)) - set(keys)
+    if overlap:
+        raise ValueError(f"Duplicate realism metric columns: {sorted(overlap)}")
+    return pd.concat([left, right.drop(columns=keys)], axis=1)
 
 
 def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, list[RolloutResult]]]:
@@ -49,12 +86,11 @@ def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, lis
         f"{len(scenarios)} scenarios x {args.num_agents} agents x {args.max_steps} steps"
     )
 
+    preflight_models(args.models, args, scenarios[0])
     results: dict[str, list[RolloutResult]] = {}
     train_seeds: dict[str, list[int]] = {}
     for model in args.models:
         seed_pairs = resolve_train_seeds(model, args.train_seeds, base=_base_checkpoint(model, args))
-        if args.train_seeds and is_learned(model) and seed_pairs[0][0] == -1:
-            print(f"  [{model}] no per-seed checkpoints found; falling back to a single checkpoint")
         model_results: list[RolloutResult] = []
         model_train_seeds: list[int] = []
         for train_seed, checkpoint in seed_pairs:
@@ -196,7 +232,7 @@ def main() -> None:
 
             flat = [r for model_results in results.values() for r in model_results]
             realism = realism_frame(flat)
-            frame = frame.merge(realism, on=["model", "seed"], how="left")
+            frame = _attach_realism_metrics(frame, realism)
         except Exception as exc:  # data file or scipy missing
             print(f"[realism] skipped: {exc}")
 

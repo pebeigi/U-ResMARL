@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""Drop parked / short tracks from Jounieh and TGSIM calibration CSVs.
+"""Tag which vehicles are ego-calibration candidates vs scene neighbors.
 
-A vehicle (run_id, id) is kept only if:
-  * it is present for at least ``min_duration_s`` seconds, and
-  * it is not stationary (85th-percentile speed >= ``min_speed_p85`` and
-    travelled path length >= ``min_path_m``).
+A vehicle (run_id, id) is an ego candidate (``keep_ego``) only if:
+  * it is present for more than ``min_duration_s`` seconds, and
+  * it actually moves (travelled path length >= ``min_path_m`` and
+    85th-percentile speed >= ``min_speed_p85``).
 
-Dropped IDs are removed entirely so they are neither ego nor neighbors.
+Parked / short tracks stay in the trajectory file as neighbors. They are not
+used as ego IDs during calibration.
 """
 
 from __future__ import annotations
@@ -17,21 +18,19 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-MIN_DURATION_S = 10.0
+MIN_DURATION_S = 20.0
 MIN_SPEED_P85 = 1.0  # m/s — 85% of samples below this → parked / idle
-MIN_PATH_M = 8.0
+MIN_PATH_M = 10.0
 
 
-def vehicle_keep_mask(
+def ego_filter_report(
     df: pd.DataFrame,
     *,
     min_duration_s: float = MIN_DURATION_S,
     min_speed_p85: float = MIN_SPEED_P85,
     min_path_m: float = MIN_PATH_M,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Return (kept_traj, drop_report)."""
+) -> pd.DataFrame:
     rows = []
-    keep_keys = set()
     for (run_id, vid), g in df.groupby(["run_id", "id"], sort=False):
         t = g["time"].to_numpy(float)
         x = g["xloc_kf"].to_numpy(float)
@@ -40,11 +39,9 @@ def vehicle_keep_mask(
         duration = float(t.max() - t.min()) if len(t) else 0.0
         path_m = float(np.sum(np.hypot(np.diff(x), np.diff(y)))) if len(t) > 1 else 0.0
         speed_p85 = float(np.quantile(v, 0.85)) if len(v) else 0.0
-        too_short = duration < min_duration_s
+        too_short = duration <= min_duration_s
         stationary = (speed_p85 < min_speed_p85) or (path_m < min_path_m)
-        keep = (not too_short) and (not stationary)
-        if keep:
-            keep_keys.add((int(run_id), int(vid)))
+        keep_ego = (not too_short) and (not stationary)
         rows.append(
             {
                 "run_id": int(run_id),
@@ -55,13 +52,51 @@ def vehicle_keep_mask(
                 "path_m": path_m,
                 "too_short": bool(too_short),
                 "stationary": bool(stationary),
-                "keep": bool(keep),
+                "keep_ego": bool(keep_ego),
+                "keep": bool(keep_ego),
             }
         )
-    report = pd.DataFrame(rows)
-    key = list(zip(df["run_id"].astype(int), df["id"].astype(int)))
-    mask = [(int(r), int(i)) in keep_keys for r, i in key]
-    kept = df.loc[mask].copy().reset_index(drop=True)
+    return pd.DataFrame(rows)
+
+
+def tag_ego_vehicles(
+    df: pd.DataFrame,
+    *,
+    min_duration_s: float = MIN_DURATION_S,
+    min_speed_p85: float = MIN_SPEED_P85,
+    min_path_m: float = MIN_PATH_M,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (all rows with keep_ego column, per-ID report)."""
+    report = ego_filter_report(
+        df,
+        min_duration_s=min_duration_s,
+        min_speed_p85=min_speed_p85,
+        min_path_m=min_path_m,
+    )
+    keep_keys = set(
+        zip(report.loc[report["keep_ego"], "run_id"].astype(int), report.loc[report["keep_ego"], "id"].astype(int))
+    )
+    out = df.copy()
+    key = list(zip(out["run_id"].astype(int), out["id"].astype(int)))
+    out["keep_ego"] = [(int(r), int(i)) in keep_keys for r, i in key]
+    return out.reset_index(drop=True), report
+
+
+def vehicle_keep_mask(
+    df: pd.DataFrame,
+    *,
+    min_duration_s: float = MIN_DURATION_S,
+    min_speed_p85: float = MIN_SPEED_P85,
+    min_path_m: float = MIN_PATH_M,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Legacy helper: drop non-ego IDs. Prefer ``tag_ego_vehicles``."""
+    tagged, report = tag_ego_vehicles(
+        df,
+        min_duration_s=min_duration_s,
+        min_speed_p85=min_speed_p85,
+        min_path_m=min_path_m,
+    )
+    kept = tagged.loc[tagged["keep_ego"]].drop(columns=["keep_ego"]).reset_index(drop=True)
     return kept, report
 
 
@@ -71,29 +106,32 @@ def apply_and_write(
     min_duration_s: float = MIN_DURATION_S,
     min_speed_p85: float = MIN_SPEED_P85,
     min_path_m: float = MIN_PATH_M,
+    drop_non_ego: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     df = pd.read_csv(traj_path)
     n_ids_before = df.groupby(["run_id", "id"]).ngroups
-    kept, report = vehicle_keep_mask(
+    tagged, report = tag_ego_vehicles(
         df,
         min_duration_s=min_duration_s,
         min_speed_p85=min_speed_p85,
         min_path_m=min_path_m,
     )
-    kept.to_csv(traj_path, index=False)
+    written = tagged.loc[tagged["keep_ego"]].copy() if drop_non_ego else tagged
+    written.to_csv(traj_path, index=False)
     report_path = traj_path.with_name("vehicle_filter_report.csv")
     report.to_csv(report_path, index=False)
-    dropped = report[~report["keep"]]
+    dropped = report[~report["keep_ego"]]
     n_short = int((dropped["too_short"] & ~dropped["stationary"]).sum())
     n_stat = int((~dropped["too_short"] & dropped["stationary"]).sum())
     n_both = int((dropped["too_short"] & dropped["stationary"]).sum())
     print(
-        f"{traj_path}: {n_ids_before} → {int(report['keep'].sum())} vehicles, "
-        f"{len(df):,} → {len(kept):,} rows "
+        f"{traj_path}: {n_ids_before} vehicles, "
+        f"{int(report['keep_ego'].sum())} ego / {int((~report['keep_ego']).sum())} scene-only, "
+        f"{len(written):,} rows written "
         f"(too_short_only={n_short}, stationary_only={n_stat}, both={n_both})"
     )
     print(f"  wrote {report_path}")
-    return kept, report
+    return written, report
 
 
 def main() -> None:
@@ -102,6 +140,11 @@ def main() -> None:
     parser.add_argument("--min-duration", type=float, default=MIN_DURATION_S)
     parser.add_argument("--min-speed-p85", type=float, default=MIN_SPEED_P85)
     parser.add_argument("--min-path-m", type=float, default=MIN_PATH_M)
+    parser.add_argument(
+        "--drop-non-ego",
+        action="store_true",
+        help="Remove scene-only IDs from the CSV (legacy). Default keeps them as neighbors.",
+    )
     args = parser.parse_args()
     for path in args.traj_csv:
         apply_and_write(
@@ -109,9 +152,9 @@ def main() -> None:
             min_duration_s=args.min_duration,
             min_speed_p85=args.min_speed_p85,
             min_path_m=args.min_path_m,
+            drop_non_ego=args.drop_non_ego,
         )
 
 
 if __name__ == "__main__":
     main()
-

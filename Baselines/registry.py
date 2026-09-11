@@ -29,16 +29,16 @@ def _residual_marl(**kwargs: Any) -> Controller:
     return ResidualMARLController(**kwargs)
 
 
-# Residual ablations that share the main residual checkpoint (inference-time masks only).
-RESIDUAL_INFERENCE_VARIANTS = frozenset(
-    {
-        "residual_marl",
-        "residual_sigma_frozen",
-        "residual_weights_only",
-        "residual_sigma_only",
-        "residual_nominal",
-    }
-)
+# Only the candidate residual uses the main checkpoint override.
+RESIDUAL_INFERENCE_VARIANTS = frozenset({"residual_marl"})
+
+
+def _residual_param(**kwargs: Any) -> Controller:
+    from Baselines.residual_marl import ResidualMARLController
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("name", "residual_param")
+    return ResidualMARLController(**kwargs)
+
 
 from RL.param_gauge import AMPLITUDE_LOGIT_KEYS, SHAPE_RESIDUAL_KEYS
 
@@ -58,16 +58,21 @@ def _residual_sigma_frozen(**kwargs: Any) -> Controller:
     """Legacy name: freeze collision-kernel shape residuals (sigma only at base)."""
     from Baselines.residual_marl import ResidualMARLController
 
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_sigma_frozen")
     return ResidualMARLController(**kwargs)
 
 
 def _residual_weights_only(**kwargs: Any) -> Controller:
-    """Freeze amplitude logits; residual may only adjust shape coordinates."""
+    """Freeze collision-kernel σ residuals; only amplitude logits + other shape adapt.
+
+    Matches the paper's "weights-only / Δσ frozen" ablation naming.
+    """
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("freeze_keys", AMPLITUDE_LOGIT_KEYS)
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_weights_only")
     return ResidualMARLController(**kwargs)
 
@@ -76,6 +81,7 @@ def _residual_sigma_only(**kwargs: Any) -> Controller:
     """Freeze amplitude logits and non-sigma shape; only sigma_* may adapt."""
     from Baselines.residual_marl import ResidualMARLController
 
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", AMPLITUDE_LOGIT_KEYS + _SHAPE_EXCEPT_SIGMA)
     kwargs.setdefault("name", "residual_sigma_only")
     return ResidualMARLController(**kwargs)
@@ -85,6 +91,7 @@ def _residual_nominal(**kwargs: Any) -> Controller:
     """Residual on the uncalibrated nominal prior (tests calibration importance)."""
     from Baselines.residual_marl import ResidualMARLController
 
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_nominal_policy.pt"))
     kwargs.setdefault("prefer", "nominal")
     kwargs.setdefault("name", "residual_nominal")
     return ResidualMARLController(**kwargs)
@@ -94,7 +101,7 @@ def _residual_collpen(**kwargs: Any) -> Controller:
     """Residual trained with an OBB collision penalty (sparse training by default)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/residual_collpen_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_collpen_policy.pt"))
     kwargs.setdefault("name", "residual_collpen")
     return ResidualMARLController(**kwargs)
 
@@ -103,7 +110,7 @@ def _residual_collpen_dense(**kwargs: Any) -> Controller:
     """Collision-penalty residual trained under dense spawn (stress distribution)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/residual_collpen_dense_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"))
     kwargs.setdefault("name", "residual_collpen_dense")
     return ResidualMARLController(**kwargs)
 
@@ -154,7 +161,7 @@ def _pure_rl_safe(**kwargs: Any) -> Controller:
     """Pure RL trained with an explicit collision penalty added to the shared reward."""
     from Baselines.pure_rl import PureRLController
 
-    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/pure_rl_safe_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/v2/pure_rl_safe_policy.pt"))
     kwargs.setdefault("name", "pure_rl_safe")
     return PureRLController(**kwargs)
 
@@ -175,6 +182,7 @@ REGISTRY: dict[str, Callable[..., Controller]] = {
     "utility_pt_logit": _utility_pt_logit,
     "utility_nominal": _utility_nominal,
     "residual_marl": _residual_marl,
+    "residual_param": _residual_param,
     "residual_sigma_frozen": _residual_sigma_frozen,
     "residual_weights_only": _residual_weights_only,
     "residual_sigma_only": _residual_sigma_only,
@@ -215,6 +223,7 @@ LABELS = {
     "utility_nominal": "Utility prior (nominal)",
     "utility_pt_logit": "Utility prior (logit choice)",
     "residual_marl": "Residual MARL (ours)",
+    "residual_param": "Parameter residual",
     "residual_sigma_frozen": "Residual (σ frozen, legacy)",
     "residual_weights_only": "Residual (weights only)",
     "residual_sigma_only": "Residual (sigma only)",
@@ -238,19 +247,20 @@ LABELS = {
 # Models whose behavior depends on a training seed, with the checkpoint that a
 # single-seed run writes. Seeded runs append "_seed<k>" to the stem.
 LEARNED_CHECKPOINTS: dict[str, Path] = {
-    "residual_marl": Path("RL/checkpoints/residual_policy.pt"),
-    "residual_sigma_frozen": Path("RL/checkpoints/residual_policy.pt"),
-    "residual_weights_only": Path("RL/checkpoints/residual_policy.pt"),
-    "residual_sigma_only": Path("RL/checkpoints/residual_policy.pt"),
-    "residual_nominal": Path("RL/checkpoints/residual_policy.pt"),
-    "residual_collpen": Path("RL/checkpoints/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/residual_collpen_dense_policy.pt"),
-    "pure_rl": Path("Baselines/checkpoints/pure_rl_policy.pt"),
-    "direct_discrete_rl": Path("Baselines/checkpoints/direct_discrete_policy.pt"),
-    "pure_rl_safe": Path("Baselines/checkpoints/pure_rl_safe_policy.pt"),
-    "mappo": Path("Baselines/checkpoints/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/hatrpo_policy.pt"),
+    "residual_marl": Path("RL/checkpoints/v2/residual_policy.pt"),
+    "residual_sigma_frozen": Path("RL/checkpoints/v2/residual_param_policy.pt"),
+    "residual_weights_only": Path("RL/checkpoints/v2/residual_param_policy.pt"),
+    "residual_sigma_only": Path("RL/checkpoints/v2/residual_param_policy.pt"),
+    "residual_nominal": Path("RL/checkpoints/v2/residual_nominal_policy.pt"),
+    "residual_param": Path("RL/checkpoints/v2/residual_param_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/v2/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"),
+    "pure_rl": Path("Baselines/checkpoints/v2/pure_rl_policy.pt"),
+    "direct_discrete_rl": Path("Baselines/checkpoints/v2/direct_discrete_policy.pt"),
+    "pure_rl_safe": Path("Baselines/checkpoints/v2/pure_rl_safe_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/v2/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/v2/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/v2/hatrpo_policy.pt"),
 }
 
 
@@ -271,21 +281,19 @@ def resolve_train_seeds(
     train_seeds: list[int] | None,
     base: Path | None = None,
 ) -> list[tuple[int, Path | None]]:
-    """(train_seed, checkpoint) pairs to evaluate for one model.
-
-    Falls back to the single-seed checkpoint when no per-seed files exist, so the
-    benchmark still runs before multi-seed training has been done.
-    """
+    """Require every requested seed; never substitute or silently drop runs."""
     if not train_seeds or not is_learned(name):
         return [(-1, base)]
-    pairs = []
-    for s in train_seeds:
-        path = seed_checkpoint(name, s, base)
-        if path is not None and path.exists():
-            pairs.append((int(s), path))
-    if pairs:
-        return pairs
-    return [(-1, base)]
+    pairs, missing = [], []
+    for seed in dict.fromkeys(train_seeds):
+        path = seed_checkpoint(name, seed, base)
+        if path is None or not path.exists():
+            missing.append(str(path))
+        else:
+            pairs.append((int(seed), path))
+    if missing:
+        raise FileNotFoundError(f"{name}: missing requested seed checkpoints: {', '.join(missing)}")
+    return pairs
 
 
 def build_controller(name: str, **kwargs: Any) -> Controller:
@@ -313,11 +321,8 @@ def controller_kwargs(
         if residual_checkpoint is not None:
             kwargs["checkpoint"] = residual_checkpoint
         return kwargs
-    if name in {"residual_collpen", "residual_collpen_dense"}:
-        kwargs = {"calibration": calibration}
-        if residual_checkpoint is not None and "collpen" in residual_checkpoint.name:
-            kwargs["checkpoint"] = residual_checkpoint
-        return kwargs
+    if name.startswith("residual"):
+        return {"calibration": calibration, "checkpoint": LEARNED_CHECKPOINTS[name]}
     if name in {"utility_pt", "utility_pt_logit"}:
         return {"calibration": calibration}
     if name == "pure_rl":

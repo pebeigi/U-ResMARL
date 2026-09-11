@@ -21,6 +21,7 @@ import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
 from Baselines.dynamics import MAX_STEERING, observation, observation_dim
 from Baselines.nets import RunningNorm
+from RL.obs import adapt_observation
 from utility_model import TrafficAgent
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -34,7 +35,7 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the pure-RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/pure_rl_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/v2/pure_rl_policy.pt")
 ACTION_DIM = 2
 
 
@@ -98,6 +99,7 @@ class PureRLPolicy(nn.Module):
         return action.cpu().numpy(), float(log_prob), float(value)
 
     def act(self, obs: np.ndarray, explore_std: float = 0.0) -> tuple[float, float]:
+        obs = adapt_observation(np.asarray(obs, dtype=np.float32), self.obs_dim)
         obs_t = torch.as_tensor(obs, dtype=torch.float32)
         with torch.no_grad():
             mean, _ = self.forward(obs_t)
@@ -108,6 +110,8 @@ class PureRLPolicy(nn.Module):
 
 def load_pure_rl_policy(checkpoint: Path, obs_dim: int) -> PureRLPolicy:
     blob = torch.load(checkpoint, map_location="cpu")
+    from RL.protocol import validate_checkpoint
+    validate_checkpoint(blob, obs_dim, checkpoint)
     policy = PureRLPolicy(
         obs_dim=int(blob.get("obs_dim", obs_dim)),
         hidden_dim=int(blob.get("hidden_dim", 128)),
@@ -148,15 +152,7 @@ class PureRLController(BaseController):
         if self.policy is not None or self.checkpoint is None:
             return
         if not self.checkpoint.exists():
-            if not self._warned:
-                print(
-                    f"[pure_rl] checkpoint {self.checkpoint} not found; using an untrained "
-                    "policy. Train it with: python -m Baselines.train_pure_rl"
-                )
-                self._warned = True
-            self.policy = PureRLPolicy(observation_dim(scenario))
-            self.policy.eval()
-            return
+            raise FileNotFoundError(f"Missing trained checkpoint {self.checkpoint}; train before evaluation")
         self.policy = load_pure_rl_policy(self.checkpoint, observation_dim(scenario))
 
     def compute_controls(

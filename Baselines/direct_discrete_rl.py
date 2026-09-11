@@ -26,6 +26,7 @@ from Baselines.discrete_action import (
     num_grid_actions,
 )
 from Baselines.dynamics import observation, observation_dim
+from RL.obs import adapt_observation
 from RL.train_ppo import normalize_obs
 from utility_model import TrafficAgent
 
@@ -40,10 +41,13 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the direct discrete RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/direct_discrete_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/v2/direct_discrete_policy.pt")
 
 
-class DirectDiscretePolicy(nn.Module):
+from RL.value_normalization import ValueNormalizer
+
+
+class DirectDiscretePolicy(ValueNormalizer):
     """Shared actor-critic with a categorical policy over the candidate grid."""
 
     def __init__(
@@ -92,14 +96,14 @@ class DirectDiscretePolicy(nn.Module):
         logits = self.logits(obs, mask)
         dist = torch.distributions.Categorical(logits=logits)
         value = self.critic(self._features(obs)).squeeze(-1)
-        return dist, value
+        return dist, self.denormalize_value(value)
 
     def sample_action(
         self,
         obs: np.ndarray,
         mask: np.ndarray,
     ) -> tuple[int, float, float]:
-        obs_t = torch.as_tensor(obs, dtype=torch.float32)
+        obs_t = torch.as_tensor(adapt_observation(obs, self.obs_dim), dtype=torch.float32)
         mask_t = torch.as_tensor(mask, dtype=torch.bool)
         with torch.no_grad():
             dist, value = self.distribution(obs_t, mask_t)
@@ -113,7 +117,7 @@ class DirectDiscretePolicy(nn.Module):
         mask: np.ndarray,
         explore: bool = False,
     ) -> int:
-        obs_t = torch.as_tensor(obs, dtype=torch.float32)
+        obs_t = torch.as_tensor(adapt_observation(obs, self.obs_dim), dtype=torch.float32)
         mask_t = torch.as_tensor(mask, dtype=torch.bool)
         with torch.no_grad():
             logits = self.logits(obs_t, mask_t)
@@ -125,6 +129,8 @@ class DirectDiscretePolicy(nn.Module):
 
 def load_direct_discrete_policy(checkpoint: Path, obs_dim: int, num_actions: int) -> DirectDiscretePolicy:
     blob = torch.load(checkpoint, map_location="cpu")
+    from RL.protocol import validate_checkpoint
+    validate_checkpoint(blob, obs_dim, checkpoint)
     policy = DirectDiscretePolicy(
         obs_dim=int(blob.get("obs_dim", obs_dim)),
         num_actions=int(blob.get("num_actions", num_actions)),
@@ -159,19 +165,7 @@ class DirectDiscreteRLController(BaseController):
         if self.policy is not None or self.checkpoint is None:
             return
         if not self.checkpoint.exists():
-            if not self._warned:
-                print(
-                    f"[direct_discrete_rl] checkpoint {self.checkpoint} not found; using an untrained "
-                    "policy. Train with: python -m Baselines.train_direct_discrete_rl"
-                )
-                self._warned = True
-            self.policy = DirectDiscretePolicy(
-                observation_dim(scenario),
-                num_grid_actions(scenario.sim_config),
-                highway_length=float(scenario.corridor.length),
-            )
-            self.policy.eval()
-            return
+            raise FileNotFoundError(f"Missing trained checkpoint {self.checkpoint}; train before evaluation")
         self.policy = load_direct_discrete_policy(
             self.checkpoint,
             observation_dim(scenario),

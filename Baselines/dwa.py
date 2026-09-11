@@ -17,6 +17,7 @@ import numpy as np
 
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
+from Baselines.dynamics import goal_approach_control
 from Baselines.dynamics import MAX_STEERING, control_obb_conflict, simulate_bicycle_batch
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
@@ -175,8 +176,9 @@ class DWAController(BaseController):
 
             # Stop at the destination station.
             remaining = float(self._dest_s[i]) - float(s_now)
-            if remaining < max(agent.speed * dt * 2.0, 3.0):
-                controls.append((float(np.clip(-agent.speed / dt, -4.0, 0.0)), 0.0))
+            approach = goal_approach_control(agent, scenario, float(self._dest_s[i]))
+            if approach is not None:
+                controls.append(approach)
                 continue
 
             best = int(np.argmax(score))

@@ -28,6 +28,7 @@ from shapely.ops import unary_union
 
 import Calibration._paths  # noqa: F401 — repo root on sys.path
 from Calibration._paths import REPO_ROOT
+from data.site_prep import attach_desired_speed
 from RL.traffic_env import EnvConfig
 from utility_model import (
     UTILITY_PARAM_KEYS,
@@ -86,6 +87,46 @@ class RolloutWindow:
 # typing.Dict/Tuple: this is a runtime alias (not postponed by __future__ annotations).
 # Required for Python 3.8 compatibility.
 BoundaryMap = Dict[Tuple[int, int], pd.DataFrame]
+
+
+class SceneTimeIndex:
+    """Neighbor frames by (run, time), with a snap so clocks need not match exactly."""
+
+    def __init__(self, scene_df: pd.DataFrame, atol: float = 0.08):
+        self.atol = float(atol)
+        self._times: dict[int, np.ndarray] = {}
+        self._frames: dict[int, dict[float, pd.DataFrame]] = {}
+        if scene_df is None or len(scene_df) == 0:
+            return
+        for run_id, group in scene_df.groupby("run_id", sort=False):
+            rid = int(run_id)
+            by_t = {float(t): g for t, g in group.groupby("time", sort=False)}
+            self._frames[rid] = by_t
+            self._times[rid] = np.array(sorted(by_t), dtype=float)
+
+    def get(self, run_id: int | float, time: float) -> pd.DataFrame | None:
+        rid = int(run_id)
+        t = float(time)
+        by_t = self._frames.get(rid)
+        if not by_t:
+            return None
+        if t in by_t:
+            return by_t[t]
+        times = self._times.get(rid)
+        if times is None or len(times) == 0:
+            return None
+        i = int(np.searchsorted(times, t))
+        best_t = None
+        best_d = self.atol + 1.0
+        for j in (i - 1, i):
+            if 0 <= j < len(times):
+                d = abs(float(times[j]) - t)
+                if d < best_d:
+                    best_d = d
+                    best_t = float(times[j])
+        if best_t is None or best_d > self.atol:
+            return None
+        return by_t[best_t]
 
 
 def log_progress(message: str, verbose: bool) -> None:
@@ -521,6 +562,7 @@ def load_and_prepare(
     csv_path: Path,
     class_id: float | None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    header = set(pd.read_csv(csv_path, nrows=0).columns)
     cols = [
         "id",
         "time",
@@ -532,6 +574,9 @@ def load_and_prepare(
         "class",
         "run_id",
     ]
+    for extra in ("keep_ego", "length_smoothed", "width_smoothed"):
+        if extra in header:
+            cols.append(extra)
     df = pd.read_csv(csv_path, usecols=cols)
     df = df.dropna(subset=["id", "time", "xloc_kf", "yloc_kf", "speed_kf", "run_id"])
     df = df.sort_values(["run_id", "id", "time"]).reset_index(drop=True)
@@ -539,16 +584,13 @@ def load_and_prepare(
 
     for col in ("xloc_kf", "yloc_kf", "speed_kf", "time"):
         df[f"next_{col}"] = group[col].shift(-1)
+    # Per-ID endpoints: first sample = initial state, last sample = destination.
+    df["initial_x"] = group["xloc_kf"].transform("first")
+    df["initial_y"] = group["yloc_kf"].transform("first")
     df["final_x"] = group["xloc_kf"].transform("last")
     df["final_y"] = group["yloc_kf"].transform("last")
     df["nominal_y"] = group["yloc_kf"].transform("median")
-
-    def _desired(s: pd.Series) -> float:
-        moving = s[s.to_numpy(float) > 1.0]
-        src = moving if len(moving) >= 5 else s
-        return float(np.quantile(src.to_numpy(float), 0.85))
-
-    df["desired_speed"] = group["speed_kf"].transform(_desired)
+    df = attach_desired_speed(df)
 
     dx = df["next_xloc_kf"] - df["xloc_kf"]
     dy = df["next_yloc_kf"] - df["yloc_kf"]
@@ -560,17 +602,21 @@ def load_and_prepare(
     df["heading"] = df.groupby(["run_id", "id"], sort=False)["heading"].transform(
         lambda s: s.ffill().bfill()
     )
-    df["vx"] = df["speed_kf"] * np.cos(df["heading"])
-    df["vy"] = df["speed_kf"] * np.sin(df["heading"])
+    df["heading"] = df["heading"].fillna(0.0)
+    df["vx"] = df["speed_kf"].to_numpy(float) * np.cos(df["heading"].to_numpy(float))
+    df["vy"] = df["speed_kf"].to_numpy(float) * np.sin(df["heading"].to_numpy(float))
 
+    # Scene keeps every occupant of the roadway, including parked / last samples.
+    scene = df[np.isfinite(df["xloc_kf"]) & np.isfinite(df["yloc_kf"])].copy()
     time_ok = (
         df["next_xloc_kf"].notna()
         & df["next_yloc_kf"].notna()
         & df["dt"].between(0.05, 0.2)
         & np.isfinite(df["heading"])
     )
-    scene = df[time_ok].copy()
-    ego = scene
+    ego = df[time_ok].copy()
+    if "keep_ego" in ego.columns:
+        ego = ego[ego["keep_ego"].astype(bool)]
     if class_id is not None:
         ego = ego[ego["class"] == class_id]
     ego = ego[ego["speed_kf"] > 0.5].copy()
@@ -578,13 +624,21 @@ def load_and_prepare(
 
 
 def make_agent(row: pd.Series, agent_id: int) -> TrafficAgent:
+    if isinstance(row, dict):
+        row = pd.Series(row)
     vel = np.array([row["vx"], row["vy"]], dtype=float)
+    v_des = float(row["desired_speed"])
+    if "max_speed" in row.index and np.isfinite(row["max_speed"]):
+        v_max = float(row["max_speed"])
+    else:
+        v_max = v_des
     return TrafficAgent(
         agent_id=agent_id,
         pos=np.array([row["xloc_kf"], row["yloc_kf"]], dtype=float),
         vel=vel,
         dest=np.array([row["final_x"], row["final_y"]], dtype=float),
-        desired_speed=float(row["desired_speed"]),
+        desired_speed=v_des,
+        max_speed=max(v_max, v_des, 1.0),
         nominal_y=float(row["nominal_y"]),
         run_id=int(row["run_id"]),
         lane_kf=int(row["lane_kf"]),
@@ -639,7 +693,7 @@ def observed_neighbors(
     neighbor_radius: float,
     max_neighbors: int,
 ) -> list[TrafficAgent]:
-    if same_time is None or len(same_time) < 2:
+    if same_time is None or len(same_time) == 0:
         return []
     dx = same_time["xloc_kf"].to_numpy(float) - float(ego_pos[0])
     dy = same_time["yloc_kf"].to_numpy(float) - float(ego_pos[1])
@@ -765,7 +819,7 @@ def sample_choices(
         candidate_rows = df
 
     neighbor_src = scene_df if scene_df is not None else df
-    grouped = {key: group for key, group in neighbor_src.groupby(["run_id", "time"], sort=False)}
+    grouped = SceneTimeIndex(neighbor_src)
     samples: list[ChoiceSample] = []
     log_progress(
         f"Building up to {args.n_samples} choice samples from {len(candidate_rows)} candidate rows...",
@@ -773,10 +827,9 @@ def sample_choices(
     )
     next_report = max(args.n_samples // 10, 1)
     for _, row in candidate_rows.sample(frac=1.0, random_state=args.seed).iterrows():
-        key = (row["run_id"], row["time"])
-        same_time = grouped.get(key)
-        if same_time is None or len(same_time) < 2:
-            continue
+        same_time = grouped.get(row["run_id"], row["time"])
+        if same_time is None:
+            same_time = pd.DataFrame()
         sample = build_choice_sample(
             row,
             same_time,
@@ -808,11 +861,8 @@ def utility_values(sample: ChoiceSample, params: dict[str, float]) -> np.ndarray
     h_p = max(2.0 * sample.current_speed, 5.0)
     distance_term = 1.0 / (1.0 + (d_eff / h_p) ** params["gamma"])
     err = np.maximum(sample.path_error, 0.0)
-    if getattr(sample, "path_mode", "boundary") == "site_polygon":
-        cap = 1.5
-        path_penalty = 1.0 - np.exp(-params["beta"] * np.minimum(err, cap) ** 2) + np.maximum(0.0, err - cap)
-    else:
-        path_penalty = 1.0 - np.exp(-params["beta"] * err**2)
+    # Same path term as Lebanon freeway calibration (Paper Eq. 13): 1 - exp(-β ℓ²).
+    path_penalty = 1.0 - np.exp(-params["beta"] * err**2)
 
     return (
         params["S_theta"] * sample.dir_cos
@@ -1058,6 +1108,7 @@ def rollout_loss(
     window_losses: list[float] = []
     for window in windows:
         agent = make_agent(window.rows[0], 0)
+        dest_tol = float(sim_config.get("destination_threshold", 1.0))
         step_losses: list[float] = []
         for row in window.rows[:-1]:
             dt = float(row["dt"])
@@ -1065,24 +1116,28 @@ def rollout_loss(
                 continue
             local_config = dict(sim_config)
             local_config["dt"] = dt
-            same_time = grouped_by_time.get((row["run_id"], row["time"]))
-            neighbors = observed_neighbors(
-                same_time,
-                agent.pos,
-                ego_id=row["id"],
-                neighbor_radius=args.neighbor_radius,
-                max_neighbors=args.max_neighbors,
-            )
-            chosen = select_best_candidate_with_boundary(
-                agent,
-                neighbors,
-                params,
-                local_config,
-                run_id=int(row["run_id"]),
-                lane_kf=int(row["lane_kf"]),
-                boundary_map=boundary_map,
-            )
-            agent.update_state_from_candidate(chosen, dt, local_config["destination_threshold"])
+            if agent.reached_destination or np.linalg.norm(agent.pos - agent.dest) < dest_tol:
+                agent.reached_destination = True
+                agent.vel = np.zeros(2, dtype=float)
+            else:
+                same_time = grouped_by_time.get(row["run_id"], row["time"])
+                neighbors = observed_neighbors(
+                    same_time,
+                    agent.pos,
+                    ego_id=row["id"],
+                    neighbor_radius=args.neighbor_radius,
+                    max_neighbors=args.max_neighbors,
+                )
+                chosen = select_best_candidate_with_boundary(
+                    agent,
+                    neighbors,
+                    params,
+                    local_config,
+                    run_id=int(row["run_id"]),
+                    lane_kf=int(row["lane_kf"]),
+                    boundary_map=boundary_map,
+                )
+                agent.update_state_from_candidate(chosen, dt, local_config["destination_threshold"])
 
             observed_pos = np.array([row["next_xloc_kf"], row["next_yloc_kf"]], dtype=float)
             pos_error = float(np.linalg.norm(agent.pos - observed_pos))
@@ -1401,8 +1456,8 @@ def calibrate_once(
             best = min(scored, key=lambda x: x[0])
             log_progress(
                 f"  restart {restart + 1}: {i + 1}/{len(candidates)} candidates, "
-                f"best_objective={best[0]:.4f}, nll={best[1]:.4f}, "
-                f"rollout={best[2]:.4f}, tracking={best[3]:.4f}",
+                f"this={objective:.4f} (rollout={closed_loop_loss:.4f}), "
+                f"best={best[0]:.4f} (rollout={best[2]:.4f})",
                 args.verbose,
             )
     return scored
@@ -1691,9 +1746,9 @@ def samples_for_vehicle(
         rows = rows.iloc[np.linspace(0, len(rows) - 1, args.per_id_samples).astype(int)]
     samples: list[ChoiceSample] = []
     for _, row in rows.iterrows():
-        same_time = grouped_by_time.get((row["run_id"], row["time"]))
-        if same_time is None or len(same_time) < 2:
-            continue
+        same_time = grouped_by_time.get(row["run_id"], row["time"])
+        if same_time is None:
+            same_time = pd.DataFrame()
         sample = build_choice_sample(
             row,
             same_time,
@@ -1723,6 +1778,10 @@ def simulate_vehicle(
         return pd.DataFrame()
     first = pd.Series(rows[0])
     agent = make_agent(first, 0)
+    dest_tol = float(sim_config.get("destination_threshold", 1.0))
+    if np.linalg.norm(agent.pos - agent.dest) < dest_tol:
+        agent.reached_destination = True
+        agent.vel = np.zeros(2, dtype=float)
     sim_rows = [
         {
             "time": float(first["time"]),
@@ -1740,7 +1799,22 @@ def simulate_vehicle(
             continue
         local_config = dict(sim_config)
         local_config["dt"] = dt
-        same_time = grouped_by_time.get((row["run_id"], row["time"]))
+        next_time = float(row["next_time"])
+        if agent.reached_destination or np.linalg.norm(agent.pos - agent.dest) < dest_tol:
+            agent.reached_destination = True
+            agent.vel = np.zeros(2, dtype=float)
+            sim_rows.append(
+                {
+                    "time": next_time,
+                    "x": float(agent.pos[0]),
+                    "y": float(agent.pos[1]),
+                    "vx": 0.0,
+                    "vy": 0.0,
+                    "speed": 0.0,
+                }
+            )
+            continue
+        same_time = grouped_by_time.get(row["run_id"], row["time"])
         neighbors = observed_neighbors(
             same_time,
             agent.pos,
@@ -1766,7 +1840,6 @@ def simulate_vehicle(
             reference_pos=reference_pos,
         )
         agent.update_state_from_candidate(chosen, dt, local_config["destination_threshold"])
-        next_time = float(row["next_time"])
         sim_rows.append(
             {
                 "time": next_time,
@@ -1785,6 +1858,53 @@ def params_text(params: dict[str, float]) -> str:
     return "\n".join(rows)
 
 
+def _movement_limits(
+    obs_xy: np.ndarray,
+    sim_xy: np.ndarray,
+    dest: np.ndarray,
+    pad_frac: float = 0.18,
+    pad_min: float = 6.0,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    pts = [obs_xy]
+    if len(sim_xy):
+        pts.append(np.atleast_2d(sim_xy))
+    pts.append(np.atleast_2d(dest))
+    xy = np.vstack(pts)
+    xmin, ymin = np.nanmin(xy, axis=0)
+    xmax, ymax = np.nanmax(xy, axis=0)
+    span = max(float(xmax - xmin), float(ymax - ymin), 1.0)
+    pad = max(pad_min, pad_frac * span)
+    return (float(xmin - pad), float(xmax + pad)), (float(ymin - pad), float(ymax + pad))
+
+
+def _neighbor_tracks_in_view(
+    scene_df: pd.DataFrame | None,
+    group: pd.DataFrame,
+    xlim: tuple[float, float],
+    ylim: tuple[float, float],
+) -> list[pd.DataFrame]:
+    if scene_df is None or len(scene_df) == 0:
+        return []
+    run_id = int(group["run_id"].iloc[0])
+    ego_id = int(group["id"].iloc[0])
+    t0 = float(group["time"].min())
+    t1 = float(group["time"].max())
+    src = scene_df
+    if "run_id" in src.columns:
+        src = src[src["run_id"] == run_id]
+    src = src[(src["id"] != ego_id) & (src["time"] >= t0) & (src["time"] <= t1)]
+    if src.empty:
+        return []
+    tracks: list[pd.DataFrame] = []
+    for _, other in src.groupby("id", sort=False):
+        other = other.sort_values("time")
+        x = other["xloc_kf"].to_numpy(float)
+        y = other["yloc_kf"].to_numpy(float)
+        if np.any((x >= xlim[0]) & (x <= xlim[1]) & (y >= ylim[0]) & (y <= ylim[1])):
+            tracks.append(other)
+    return tracks
+
+
 def plot_vehicle_simulated_vs_observed(
     group: pd.DataFrame,
     sim_df: pd.DataFrame,
@@ -1793,6 +1913,7 @@ def plot_vehicle_simulated_vs_observed(
     out_path: Path,
     boundary_map: BoundaryMap,
     site_polygon_csv: Path | None = None,
+    scene_df: pd.DataFrame | None = None,
 ) -> None:
     """Per-ID observed vs simulated x-y, x(t), y(t), vx(t), vy(t), speed(t)."""
     group = group.sort_values("time")
@@ -1805,6 +1926,8 @@ def plot_vehicle_simulated_vs_observed(
     boundary = boundary_map.get((run_id, lane_kf))
     obs_points = group[["xloc_kf", "yloc_kf"]].to_numpy(float)
     sim_points = sim_df[["x", "y"]].to_numpy(float)
+    dest = group[["final_x", "final_y"]].iloc[-1].to_numpy(float)
+    xlim, ylim = _movement_limits(obs_points, sim_points, dest)
     obs_lower = obs_upper = sim_lower = sim_upper = None
     use_lane_tubes = site_polygon_csv is None and boundary is not None
     if use_lane_tubes:
@@ -1815,9 +1938,20 @@ def plot_vehicle_simulated_vs_observed(
     if site_polygon_csv is not None:
         plot_site_polygon(axes[0, 0], site_polygon_csv)
 
-    axes[0, 0].plot(group["xloc_kf"], group["yloc_kf"], lw=2, label="observed")
-    axes[0, 0].plot(sim_df["x"], sim_df["y"], "--", lw=2, label="simulated")
-    dest = group[["final_x", "final_y"]].iloc[-1].to_numpy(float)
+    neighbor_tracks = _neighbor_tracks_in_view(scene_df, group, xlim, ylim)
+    for i, other in enumerate(neighbor_tracks):
+        axes[0, 0].plot(
+            other["xloc_kf"],
+            other["yloc_kf"],
+            color="0.65",
+            lw=0.9,
+            alpha=0.55,
+            zorder=2,
+            label="other agents" if i == 0 else None,
+        )
+
+    axes[0, 0].plot(group["xloc_kf"], group["yloc_kf"], lw=2.2, zorder=4, label="observed")
+    axes[0, 0].plot(sim_df["x"], sim_df["y"], "--", lw=2.2, zorder=5, label="simulated")
     axes[0, 0].scatter(
         dest[0],
         dest[1],
@@ -1827,10 +1961,12 @@ def plot_vehicle_simulated_vs_observed(
         zorder=6,
         label="destination",
     )
+    axes[0, 0].set_xlim(*xlim)
+    axes[0, 0].set_ylim(*ylim)
     axes[0, 0].set_xlabel("x (m)")
     axes[0, 0].set_ylabel("y (m)")
     axes[0, 0].set_aspect("equal", adjustable="box")
-    axes[0, 0].legend()
+    axes[0, 0].legend(loc="best", fontsize=8)
 
     axes[0, 1].plot(t_obs, group["xloc_kf"], lw=1.5, label="observed")
     axes[0, 1].plot(t_sim, sim_df["x"], "--", lw=1.5, label="simulated")
@@ -1864,8 +2000,14 @@ def plot_vehicle_simulated_vs_observed(
 
     axes[1, 2].plot(t_obs, group["speed_kf"], lw=1.5, label="observed")
     axes[1, 2].plot(t_sim, sim_df["speed"], "--", lw=1.5, label="simulated")
+    v_des = float(group["desired_speed"].iloc[0])
+    axes[1, 2].axhline(v_des, color="0.35", ls=":", lw=1.4, label=f"v_des={v_des:.2f}")
+    if "max_speed" in group.columns:
+        v_max = float(group["max_speed"].iloc[0])
+        axes[1, 2].axhline(v_max, color="0.55", ls="-.", lw=1.2, label=f"v_max={v_max:.2f}")
     axes[1, 2].set_ylabel("speed (m/s)")
     axes[1, 2].set_xlabel("time (s)")
+    axes[1, 2].legend(loc="best", fontsize=7)
 
     for ax in axes.ravel():
         ax.grid(True, alpha=0.3)
@@ -1873,13 +2015,13 @@ def plot_vehicle_simulated_vs_observed(
     vehicle_id = int(group["id"].iloc[0])
     fig.suptitle(
         f"Observed vs simulated, ID {vehicle_id}, run {run_id}, lane_kf {lane_kf}, "
-        f"local NLL={local_nll:.3f}",
+        f"v_des={v_des:.2f} m/s, NLL={local_nll:.3f}",
         fontsize=13,
     )
     axes[0, 0].text(
         1.04,
         0.98,
-        "Best parameters for this ID:\n" + params_text(params),
+        "Working parameters (site fit):\n" + params_text(params),
         transform=axes[0, 0].transAxes,
         va="top",
         ha="left",
@@ -1892,18 +2034,36 @@ def plot_vehicle_simulated_vs_observed(
     plt.close(fig)
 
 
-def infer_site_polygon_csv(traj_csv: Path | None) -> Path | None:
-    """Jounieh/TGSIM use one shared curb polygon for every vehicle ID."""
+def infer_site_key(traj_csv: Path | None) -> str:
     if traj_csv is None:
-        return None
+        return "highway"
     text = str(traj_csv).replace("\\", "/").lower()
     if "lebanon_jounieh" in text:
+        return "jounieh"
+    if "tgsim" in text:
+        return "tgsim"
+    return "highway"
+
+
+def infer_site_polygon_csv(traj_csv: Path | None) -> Path | None:
+    """Jounieh/TGSIM use one shared curb polygon for every vehicle ID."""
+    site = infer_site_key(traj_csv)
+    if site == "jounieh":
         path = REPO_ROOT / "data" / "Lebanon_Jounieh" / "Jounieh_Road_Boundaries.csv"
         return path if path.exists() else None
-    if "tgsim" in text:
+    if site == "tgsim":
         path = REPO_ROOT / "data" / "TGSIM FB" / "derived_boundaries" / "street_boundaries.csv"
         return path if path.exists() else None
     return None
+
+
+def infer_default_class_id(traj_csv: Path | None) -> float | None:
+    site = infer_site_key(traj_csv)
+    if site == "tgsim":
+        return 3.0
+    if site == "jounieh":
+        return None
+    return 1.0
 
 
 def apply_urban_site_config(cfg: EnvConfig, args: argparse.Namespace, ego_df: pd.DataFrame) -> None:
@@ -1915,18 +2075,50 @@ def apply_urban_site_config(cfg: EnvConfig, args: argparse.Namespace, ego_df: pd
         cfg.sim_config["utility_frame"] = "corridor"
         return
     cfg.sim_config["_site_roadway"] = roadway
+    # Same U() algebra as freeway calibration. Freeway U_dir follows the corridor
+    # tangent; here the analog is the on-road direction to this ID's destination.
     cfg.sim_config["_on_road_dest"] = OnRoadDestField(roadway)
     cfg.sim_config["utility_frame"] = "destination"
-    cfg.sim_config["path_mode"] = "site_polygon"
+    cfg.sim_config["path_mode"] = "boundary"
+    # Tight sites: freeway 60 m radius swallows the whole roundabout / block.
+    if float(getattr(args, "neighbor_radius", 60.0)) >= 59.0:
+        args.neighbor_radius = 20.0
+    cfg.sim_config["perception_radius"] = float(args.neighbor_radius)
     cfg.sim_config["steer_from_rest"] = True
     cfg.sim_config["min_steer_speed"] = 0.5
-    cfg.sim_config["candidate_accel_grid"] = [-5.0, -4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0]
-    cfg.sim_config["max_accel"] = 5.0
+    site = infer_site_key(getattr(args, "csv", None))
+    if site == "jounieh":
+        # Recorded L×W boxes are ~1.1×1.8 m and are not usable footprints.
+        cfg.sim_config["vehicle_length"] = 4.5
+        cfg.sim_config["vehicle_width"] = 1.8
+    elif site == "tgsim" and len(ego_df) and "length_smoothed" in ego_df.columns:
+        length = float(np.nanmedian(ego_df["length_smoothed"].to_numpy(float)))
+        width = float(np.nanmedian(ego_df["width_smoothed"].to_numpy(float)))
+        if length >= 2.0 and width >= 1.0:
+            cfg.sim_config["vehicle_length"] = length
+            cfg.sim_config["vehicle_width"] = width
     vmax = getattr(args, "max_agent_speed", None)
     if vmax is None and len(ego_df):
-        vmax = max(4.0, float(np.quantile(ego_df["speed_kf"].to_numpy(float), 0.99)) * 1.15)
+        if "max_speed" in ego_df.columns:
+            vmax = float(np.nanmax(ego_df["max_speed"].to_numpy(float)))
+        else:
+            vmax = float(np.nanmax(ego_df["speed_kf"].to_numpy(float)))
     if vmax is not None:
-        cfg.sim_config["max_agent_speed"] = float(vmax)
+        cfg.sim_config["max_agent_speed"] = float(max(vmax, 1.0))
+    # Force stop within 2 m of that ID's destination (no utility change).
+    cfg.sim_config["destination_threshold"] = 2.0
+    # Denser bicycle set on tight urban sites (freeway stays 7×9 = 63).
+    cfg.sim_config["candidate_accel_grid"] = [
+        -3.5, -2.5, -1.5, -0.75, 0.0, 0.75, 1.5, 2.5, 3.5
+    ]
+    cfg.sim_config["candidate_steering_grid"] = [
+        float(x) for x in np.linspace(-0.50, 0.50, 13)
+    ]
+    n_cand = len(cfg.sim_config["candidate_accel_grid"]) * len(
+        cfg.sim_config["candidate_steering_grid"]
+    )
+    if int(getattr(args, "tracking_rank_normalizer", 63)) == 63:
+        args.tracking_rank_normalizer = n_cand
     # Do not use per-lane PCA lower/upper for these sites.
     args.boundary_csv = None
 
@@ -1948,7 +2140,7 @@ def plot_id_timeseries(
     if cfg.sim_config.get("_site_roadway") is None:
         boundary_map = load_boundary_map(args.boundary_csv)
     neighbor_src = scene_df if scene_df is not None else df
-    grouped_by_time = {key: group for key, group in neighbor_src.groupby(["run_id", "time"], sort=False)}
+    grouped_by_time = SceneTimeIndex(neighbor_src)
     groups = list(df.groupby(["run_id", "id"], sort=True))
     if not plot_all_ids:
         groups = groups[:max_ids]
@@ -1960,39 +2152,15 @@ def plot_id_timeseries(
         local_samples = samples_for_vehicle(
             group, grouped_by_time, cfg.sim_config, args, boundary_map
         )
-        local_windows = sample_rollout_windows(
-            group,
-            n_windows=args.per_id_rollout_windows,
-            horizon_steps=args.closed_loop_horizon_steps,
-            seed=args.seed + int(vehicle_id),
+        local_nll = (
+            nll(local_samples, global_params, args.temperature)
+            if local_samples
+            else float("nan")
         )
-        if local_samples or local_windows:
-            (
-                local_objective,
-                local_nll,
-                local_closed_loop_loss,
-                local_tracking_loss,
-                local_params,
-            ) = calibrate_local_params(
-                local_samples,
-                local_windows,
-                grouped_by_time,
-                cfg.sim_config,
-                args,
-                boundary_map,
-                n_trials=args.per_id_trials,
-                seed=args.seed + int(vehicle_id),
-            )
-        else:
-            local_objective = float("nan")
-            local_nll = float("nan")
-            local_closed_loop_loss = float("nan")
-            local_tracking_loss = float("nan")
-            local_params = global_params
         sim_df = simulate_vehicle(
             group,
             grouped_by_time,
-            local_params,
+            global_params,
             cfg.sim_config,
             neighbor_radius=args.neighbor_radius,
             max_neighbors=args.max_neighbors,
@@ -2001,24 +2169,23 @@ def plot_id_timeseries(
         plot_vehicle_simulated_vs_observed(
             group,
             sim_df,
-            local_params,
+            global_params,
             local_nll,
             out_dir / f"run_{int(run_id):02d}_id_{int(vehicle_id):06d}_sim_vs_obs.png",
             boundary_map=boundary_map,
             site_polygon_csv=getattr(args, "site_polygon_csv", None),
+            scene_df=neighbor_src,
         )
         row = {
             "run_id": int(run_id),
             "id": int(vehicle_id),
             "lane_kf": int(group["lane_kf"].iloc[0]),
-            "local_objective": local_objective,
+            "desired_speed": float(group["desired_speed"].iloc[0]),
+            "max_speed": float(group["max_speed"].iloc[0]) if "max_speed" in group.columns else float("nan"),
             "local_nll": local_nll,
-            "local_closed_loop_loss": local_closed_loop_loss,
-            "local_tracking_rank": local_tracking_loss * max(args.tracking_rank_normalizer, 1.0),
             "n_local_samples": len(local_samples),
-            "n_local_rollout_windows": len(local_windows),
         }
-        row.update(local_params)
+        row.update(global_params)
         param_rows.append(row)
         if args.verbose and (plot_idx % report_every == 0 or plot_idx == n_groups):
             log_progress(f"  per-ID plots: {plot_idx}/{n_groups}", args.verbose)
@@ -2040,7 +2207,14 @@ def calibration_quality_frame(
         probs = probs / max(float(probs.sum()), 1e-12)
         order = np.argsort(u)[::-1]
         rank = int(np.where(order == sample.target_index)[0][0]) + 1
-        best_non_target = float(np.max(np.delete(u, sample.target_index)))
+        others = np.delete(u, sample.target_index)
+        if others.size == 0:
+            # Single stay-action sample (already at destination).
+            best_non_target = float(u[sample.target_index])
+            margin = 0.0
+        else:
+            best_non_target = float(np.max(others))
+            margin = float(u[sample.target_index] - best_non_target)
         rows.append(
             {
                 "run_id": sample.run_id,
@@ -2048,7 +2222,7 @@ def calibration_quality_frame(
                 "time": sample.time,
                 "target_rank": rank,
                 "target_probability": float(probs[sample.target_index]),
-                "target_margin": float(u[sample.target_index] - best_non_target),
+                "target_margin": margin,
                 "target_match_cost": sample.target_match_cost,
             }
         )
@@ -2057,8 +2231,11 @@ def calibration_quality_frame(
 
 def plot_calibration_quality(qdf: pd.DataFrame, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
+    if qdf is None or qdf.empty:
+        return
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), constrained_layout=True)
-    axes[0].hist(qdf["target_rank"], bins=np.arange(1, qdf["target_rank"].max() + 2) - 0.5)
+    rank_max = int(max(float(qdf["target_rank"].max()), 1.0))
+    axes[0].hist(qdf["target_rank"], bins=np.arange(1, rank_max + 2) - 0.5)
     axes[0].set_title("Observed-like candidate rank")
     axes[0].set_xlabel("rank (1 is best)")
     axes[0].set_ylabel("count")
@@ -2345,7 +2522,7 @@ def main() -> None:
     )
     parser.add_argument("--neighbor-radius", type=float, default=60.0)
     parser.add_argument("--max-neighbors", type=int, default=6)
-    parser.add_argument("--class-id", type=float, default=1.0)
+    parser.add_argument("--class-id", type=float, default=None, help="Ego class filter. Default: 1 highway, 3 TGSIM, all Jounieh.")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--diagnostics-dir", type=Path, default=REPO_ROOT / "Calibration" / "diagnostics")
     parser.add_argument(
@@ -2412,6 +2589,9 @@ def main() -> None:
     args = parser.parse_args()
 
     log_progress(f"Loading trajectory data from {args.csv}...", args.verbose)
+    if args.class_id is None:
+        args.class_id = infer_default_class_id(args.csv)
+        log_progress(f"Ego class-id default for this site: {args.class_id}", args.verbose)
     df, scene_df = load_and_prepare(args.csv, args.class_id)
     log_progress(
         f"Loaded {len(df)} ego rows ({df['id'].nunique()} ids) and "
@@ -2422,8 +2602,11 @@ def main() -> None:
     apply_urban_site_config(cfg, args, df)
     if cfg.sim_config.get("utility_frame") == "destination":
         log_progress(
-            "Site dest utility (on-road geodesic to each ID dest) + curb: "
-            f"{args.site_polygon_csv}, v_max={cfg.sim_config['max_agent_speed']:.2f} m/s.",
+            "Site dest utility (on-road dir/dist to each ID dest; same U algebra as freeway) + curb: "
+            f"{args.site_polygon_csv}, v_max={cfg.sim_config['max_agent_speed']:.2f} m/s, "
+            f"actions={len(cfg.sim_config['candidate_accel_grid'])}×"
+            f"{len(cfg.sim_config['candidate_steering_grid'])}="
+            f"{len(cfg.sim_config['candidate_accel_grid']) * len(cfg.sim_config['candidate_steering_grid'])}.",
             args.verbose,
         )
     boundary_map = {}
@@ -2446,7 +2629,7 @@ def main() -> None:
         n_test=args.closed_loop_test_windows,
         group_fractions=tuple(args.window_split_fractions),
     )
-    grouped_by_time = {key: group for key, group in scene_df.groupby(["run_id", "time"], sort=False)}
+    grouped_by_time = SceneTimeIndex(scene_df)
     log_progress(
         f"Prepared closed-loop windows (horizon={args.closed_loop_horizon_steps} steps): "
         f"{len(rollout_windows)} train / {len(val_windows)} val / {len(test_windows)} test "

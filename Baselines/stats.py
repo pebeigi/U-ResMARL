@@ -58,8 +58,8 @@ class MetricSummary:
     def format(self, precision: int = 3) -> str:
         if not np.isfinite(self.mean):
             return "--"
-        half = 0.5 * (self.ci_high - self.ci_low)
-        return f"{self.mean:.{precision}f} $\\pm$ {half:.{precision}f}"
+        return (f"{self.mean:.{precision}f} "
+                f"[{self.ci_low:.{precision}f}, {self.ci_high:.{precision}f}]")
 
 
 def _percentile_ci(draws: np.ndarray, alpha: float) -> tuple[float, float]:
@@ -292,7 +292,7 @@ def to_latex_ci(
     precision: int = 3,
     **kwargs: Any,
 ) -> str:
-    """Benchmark table reporting mean with half-width of the bootstrap CI."""
+    """Benchmark table reporting mean and the actual bootstrap CI endpoints."""
     model_list = models if models is not None else list(dict.fromkeys(frame["model"]))
     header_cells = ["Model", "Seeds"] + [m.replace("_", r"\_") for m in metrics]
     rows = []

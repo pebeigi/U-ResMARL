@@ -116,8 +116,10 @@ def merge_delta_logits(
     z = base_logits(base_params)
     if not delta:
         return z
-    for i, key in enumerate(AMPLITUDE_LOGIT_KEYS):
-        z[i] += float(delta.get(key, 0.0))
+    # The softmax is invariant to a common shift of all logits, so the residual is
+    # centred to drop that unidentifiable direction from the action space.
+    dz = np.array([float(delta.get(key, 0.0)) for key in AMPLITUDE_LOGIT_KEYS], dtype=float)
+    z += dz - dz.mean()
     return z
 
 

@@ -33,6 +33,19 @@ def _label(model: str) -> str:
     return LABELS.get(model, model)
 
 
+def histogram_bins(values: np.ndarray, count: int = 40) -> np.ndarray:
+    """Avoid duplicate floating-point edges for nearly constant rollouts."""
+    values = np.asarray(values)
+    finite = values[np.isfinite(values)]
+    if not finite.size:
+        return np.linspace(-0.5, 0.5, count + 1)
+    lo, hi = float(finite.min()), float(finite.max())
+    if np.isclose(lo, hi):
+        padding = max(0.5, abs(lo) * 1e-6)
+        lo, hi = lo - padding, hi + padding
+    return np.linspace(lo, hi, count + 1)
+
+
 def plot_metric_bars(frame: pd.DataFrame, output_path: Path) -> None:
     """One bar panel per headline metric, mean +/- std over scenarios."""
     models = list(dict.fromkeys(frame["model"]))
@@ -46,8 +59,17 @@ def plot_metric_bars(frame: pd.DataFrame, output_path: Path) -> None:
     for ax, (col, title, higher_better) in zip(axes, metrics):
         means = [frame.loc[frame["model"] == m, col].mean() for m in models]
         stds = [frame.loc[frame["model"] == m, col].std(ddof=0) for m in models]
-        ax.bar(range(len(models)), means, yerr=stds, capsize=4, color=colors[: len(models)])
+        finite = np.isfinite(means)
+        indices = np.flatnonzero(finite)
+        if indices.size:
+            ax.bar(indices, np.asarray(means)[finite],
+                   yerr=np.nan_to_num(np.asarray(stds)[finite], nan=0.0),
+                   capsize=4, color=colors[indices])
+        for idx in np.flatnonzero(~finite):
+            ax.text(idx, 0.02, "N/A", transform=ax.get_xaxis_transform(),
+                    ha="center", fontsize=8)
         ax.set_xticks(range(len(models)))
+        ax.set_xlim(-0.5, len(models) - 0.5)
         ax.set_xticklabels([_label(m) for m in models], rotation=30, ha="right", fontsize=8)
         arrow = "higher is better" if higher_better else "lower is better"
         ax.set_title(f"{title}\n({arrow})", fontsize=10)
@@ -201,7 +223,7 @@ def plot_distribution_comparison(
     for ax, key in zip(np.atleast_1d(axes), FEATURES):
         ax.hist(
             observed[key],
-            bins=40,
+            bins=histogram_bins(observed[key]),
             density=True,
             histtype="stepfilled",
             color="0.7",
@@ -209,10 +231,11 @@ def plot_distribution_comparison(
             label="Measured data",
         )
         for model, bucket in by_model.items():
-            values = np.concatenate([v for v in bucket[key] if v.size]) if bucket[key] else np.array([])
+            chunks = [v for v in bucket[key] if v.size]
+            values = np.concatenate(chunks) if chunks else np.array([])
             if values.size == 0:
                 continue
-            ax.hist(values, bins=40, density=True, histtype="step", lw=1.6, label=_label(model))
+            ax.hist(values, bins=histogram_bins(values), density=True, histtype="step", lw=1.6, label=_label(model))
         ax.set_title(titles[key], fontsize=10)
         ax.grid(alpha=0.3)
     np.atleast_1d(axes)[0].legend(fontsize=8)

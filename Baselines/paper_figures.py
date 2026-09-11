@@ -24,18 +24,19 @@ import pandas as pd
 import Baselines._paths  # noqa: F401
 from Baselines.ablation_stress import STRESS_SPAWN
 from Baselines.plots import (
+    histogram_bins,
     PANEL_METRICS,
     plot_distribution_comparison,
     plot_metric_bars,
     plot_trajectory_grid_frenet,
 )
-from Baselines.registry import LABELS, build_controller, controller_kwargs
+from Baselines.registry import LABELS, build_controller, controller_kwargs, seed_checkpoint
 from Baselines.runner import rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/paper")
-BENCHMARK_RAW = Path("Baselines/results/benchmark_raw.csv")
+DEFAULT_OUTPUT = Path("Baselines/results/v2/paper")
+BENCHMARK_RAW = Path("Baselines/results/v2/benchmark_raw.csv")
 
 # Clean main-table models for the paper figure (no reward-exploit / unstable MARL).
 PAPER_MODELS = [
@@ -44,6 +45,7 @@ PAPER_MODELS = [
     "dwa",
     "mppi",
     "mappo",
+    "direct_discrete_rl",
     "utility_pt",
     "residual_marl",
 ]
@@ -101,7 +103,7 @@ def make_realism_panel(
     ]
     results = []
     for model in models:
-        controller = build_controller(model, **controller_kwargs(model))
+        controller = build_controller(model, **controller_kwargs(model, checkpoint_override=seed_checkpoint(model, 0)))
         for scenario in scenario_list:
             results.append(rollout(scenario, controller))
         print(f"  realism rollouts: {_label(model)} done")
@@ -131,7 +133,7 @@ def make_realism_panel(
     for ax, key in zip(np.atleast_1d(axes), FEATURES):
         ax.hist(
             observed[key],
-            bins=40,
+            bins=histogram_bins(observed[key]),
             density=True,
             histtype="stepfilled",
             color="0.75",
@@ -140,16 +142,13 @@ def make_realism_panel(
         )
         for model in models:
             bucket = by_model.get(model, {})
-            values = (
-                np.concatenate([v for v in bucket.get(key, []) if v.size])
-                if bucket.get(key)
-                else np.array([])
-            )
+            chunks = [v for v in bucket.get(key, []) if v.size]
+            values = np.concatenate(chunks) if chunks else np.array([])
             if values.size == 0:
                 continue
             ax.hist(
                 values,
-                bins=40,
+                bins=histogram_bins(values),
                 density=True,
                 histtype="step",
                 lw=2.0,
@@ -202,7 +201,7 @@ def make_stress_frenet(
     )
     results = []
     for model in models:
-        controller = build_controller(model, **controller_kwargs(model))
+        controller = build_controller(model, **controller_kwargs(model, checkpoint_override=seed_checkpoint(model, 0)))
         result = rollout(scenario, controller)
         results.append(result)
         arrived = int((result.arrival_step >= 0).sum())
@@ -236,8 +235,8 @@ def main() -> None:
     parser.add_argument("--scenarios", type=int, default=5, help="scenarios for realism rollouts")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-agents", type=int, default=10)
-    parser.add_argument("--stress-agents", type=int, default=18)
-    parser.add_argument("--max-steps", type=int, default=300)
+    parser.add_argument("--stress-agents", type=int, default=16)
+    parser.add_argument("--max-steps", type=int, default=240)
     parser.add_argument("--run-id", type=int, default=DEFAULT_RUN_ID)
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument(

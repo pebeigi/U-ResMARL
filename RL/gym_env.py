@@ -55,85 +55,69 @@ class TrafficMARLEnv(MultiAgentEnv):
     metadata = {"render_modes": []}
 
     def __init__(self, env_config: dict[str, Any] | None = None):
+        super().__init__()
         env_config = env_config or {}
-        scales = env_config.get("residual_scales", DEFAULT_RESIDUAL_SCALES)
-        self.residual_scales = np.asarray(
-            [float(scales[k]) for k in RESIDUAL_PARAM_KEYS],
-            dtype=np.float32,
-        )
-        # Scalar fallback used only for logging / legacy configs.
-        self.residual_scale = float(env_config.get("residual_scale", float(np.mean(self.residual_scales))))
-
+        mode = env_config.get("residual_mode", "candidate_logits")
         self._cfg = EnvConfig(
             dt=float(env_config.get("dt", 0.5)),
             max_steps=int(env_config.get("max_steps", 240)),
             num_agents=int(env_config.get("num_agents", 10)),
             base_desired_speed=float(env_config.get("base_desired_speed", 8.0)),
             min_initial_spacing=float(env_config.get("min_initial_spacing", 8.0)),
-            run_id=int(env_config.get("run_id", 2)),
-            lane_kf=int(env_config.get("lane_kf", 1)),
-            base_params=env_config.get("base_params"),
-            reward_weights=env_config.get("reward_weights"),
-            sim_config=env_config.get("sim_config"),
+            run_id=int(env_config.get("run_id", 2)), lane_kf=int(env_config.get("lane_kf", 1)),
+            base_params=env_config.get("base_params"), reward_weights=env_config.get("reward_weights"),
+            sim_config=env_config.get("sim_config"), residual_mode=mode,
+            obb_safety_filter=bool(env_config.get("obb_safety_filter", False)),
+            collision_penalty=float(env_config.get("collision_penalty", 8.0)),
+            leftover_coef=float(env_config.get("leftover_coef", 0.05)),
+            arrival_bonus=float(env_config.get("arrival_bonus", 5.0)),
         )
         self._env = MultiAgentTrafficEnv(self._cfg, seed=env_config.get("seed"))
-        self._agent_ids = {agent_id(i) for i in range(self._cfg.num_agents)}
-
-        obs_dim = self._env.obs_dim
-        act_dim = len(RESIDUAL_PARAM_KEYS)
-        high_obs = np.full(obs_dim, np.inf, dtype=np.float32)
-        low_obs = -high_obs
-
-        agent_list = sorted(self._agent_ids)
-        self.observation_spaces = {
-            aid: spaces.Box(low=low_obs, high=high_obs, dtype=np.float32) for aid in agent_list
-        }
-        self.action_spaces = {
-            aid: spaces.Box(
-                low=-self.residual_scales,
-                high=self.residual_scales,
-                dtype=np.float32,
-            )
-            for aid in agent_list
-        }
-        self.observation_space = self.observation_spaces[agent_list[0]]
-        self.action_space = self.action_spaces[agent_list[0]]
-        super().__init__()
-
-    @property
-    def agents(self):
-        """RLlib / demo helper: live agent id set."""
-        return set(self._agent_ids)
+        if mode == "candidate_logits":
+            self.residual_scales = np.full(self._env.residual_dim,
+                float(env_config.get("candidate_logit_scale", 2.0)), dtype=np.float32)
+        else:
+            scales = env_config.get("residual_scales", DEFAULT_RESIDUAL_SCALES)
+            self.residual_scales = np.array([scales[k] for k in RESIDUAL_PARAM_KEYS], dtype=np.float32)
+        self.residual_scale = float(self.residual_scales.mean())
+        self.possible_agents = [agent_id(i) for i in range(self._cfg.num_agents)]
+        self.agents = list(self.possible_agents)
+        self._agent_ids = set(self.possible_agents)
+        self.observation_spaces = {aid: spaces.Box(-np.inf, np.inf, shape=(self._env.obs_dim,), dtype=np.float32)
+                                   for aid in self.possible_agents}
+        self.action_spaces = {aid: spaces.Box(-self.residual_scales, self.residual_scales, dtype=np.float32)
+                              for aid in self.possible_agents}
+        self.observation_space = self.observation_spaces[self.agents[0]]
+        self.action_space = self.action_spaces[self.agents[0]]
 
     def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None):
         if seed is not None:
             self._env.rng = np.random.default_rng(seed)
-        obs_list = self._env.reset()
-        agent_list = sorted(self._agent_ids)
-        observations = {agent_list[i]: obs_list[i] for i in range(len(obs_list))}
-        infos = {aid: {} for aid in agent_list}
-        return observations, infos
+        obs = self._env.reset()
+        self.agents = list(self.possible_agents)
+        return {aid: obs[agent_index(aid)] for aid in self.agents}, {aid: {} for aid in self.agents}
 
     def step(self, action_dict: dict[str, np.ndarray]):
-        residual_actions: list[dict[str, float]] = []
-        agent_list = sorted(self._agent_ids)
-        for i in range(self._cfg.num_agents):
-            aid = agent_list[i]
-            if aid in action_dict and action_dict[aid] is not None:
-                vec = np.clip(np.asarray(action_dict[aid], dtype=np.float32), -self.residual_scales, self.residual_scales)
-                residual_actions.append(residual_vector_to_dict(vec))
-            else:
-                residual_actions.append({})
-
-        obs_list, rewards_list, done, info = self._env.step(residual_actions)
-        observations = {agent_list[i]: obs_list[i] for i in range(len(obs_list))}
-        rewards = {agent_list[i]: float(rewards_list[i]) for i in range(len(rewards_list))}
-        terminateds = {aid: False for aid in agent_list}
-        truncateds = {aid: False for aid in agent_list}
-        terminateds["__all__"] = done
-        truncateds["__all__"] = done
-        infos = {agent_list[i]: dict(info) for i in range(len(agent_list))}
-        return observations, rewards, terminateds, truncateds, infos
+        active = list(self.agents)
+        residuals = [None] * self._cfg.num_agents
+        for aid in active:
+            if aid not in action_dict:
+                continue
+            vector = np.asarray(action_dict[aid], dtype=np.float32)
+            if vector.shape != self.residual_scales.shape:
+                raise ValueError(f"{aid}: expected residual shape {self.residual_scales.shape}, got {vector.shape}")
+            vector = np.clip(vector, -self.residual_scales, self.residual_scales)
+            residuals[agent_index(aid)] = (vector if self._cfg.residual_mode == "candidate_logits"
+                                          else residual_vector_to_dict(vector))
+        obs, rewards, done, info = self._env.step(residuals)
+        terminated = {aid: bool(self._env.agents[agent_index(aid)].reached_destination) for aid in active}
+        truncated = {aid: bool(info["truncated"] and not terminated[aid]) for aid in active}
+        terminated["__all__"] = all(a.reached_destination for a in self._env.agents)
+        truncated["__all__"] = bool(info["truncated"])
+        self.agents = [] if done else [aid for aid in active if not terminated[aid]]
+        return ({aid: obs[agent_index(aid)] for aid in active},
+                {aid: float(rewards[agent_index(aid)]) for aid in active},
+                terminated, truncated, {aid: dict(info) for aid in active})
 
     def rollout_metric(self) -> float:
         return self._env.rollout_metric()

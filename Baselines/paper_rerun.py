@@ -2,7 +2,7 @@
 
 Addresses reviewer concerns (comments 1–4):
   * Planner fairness — shared closed-loop OBB safety filter on all controllers.
-  * RL variance — 5+ independent training seeds with bootstrap CIs.
+  * RL variance — 3 independent training seeds with bootstrap CIs.
   * Matched direct discrete RL vs. residual MARL.
   * Expanded ablation package (weights-only, σ-only, nominal prior, no-lookahead).
 
@@ -31,11 +31,13 @@ from Baselines.ablation_models import (
 )
 from Baselines.registry import LEARNED_CHECKPOINTS, seed_checkpoint
 
-PAPER_OUTPUT = Path("Baselines/results/paper_rerun")
-ABLATION_OUTPUT = Path("Baselines/results/paper_ablation")
-STRESS_OUTPUT = Path("Baselines/results/paper_stress")
+PAPER_OUTPUT = Path("Baselines/results/v2/paper_rerun")
+ABLATION_OUTPUT = Path("Baselines/results/v2/paper_ablation")
+STRESS_OUTPUT = Path("Baselines/results/v2/paper_stress")
 
 TRAIN_SPECS: dict[str, list[str]] = {
+    "residual_param": ["--updates", "100", "--max-steps", "240", "--collision-penalty", "8", "--residual-mode", "param_delta"],
+    "residual_nominal": ["--updates", "100", "--max-steps", "240", "--collision-penalty", "8", "--prefer-params", "nominal"],
     "residual_marl": [
         "--updates",
         "100",
@@ -43,10 +45,12 @@ TRAIN_SPECS: dict[str, list[str]] = {
         "240",
         "--collision-penalty",
         "8",
+        "--residual-mode",
+        "candidate_logits",
     ],
     "mappo": [
         "--updates",
-        "80",
+        "100",
         "--max-steps",
         "240",
         "--collision-penalty",
@@ -72,6 +76,8 @@ TRAIN_SPECS: dict[str, list[str]] = {
         "--dense-spawn",
         "--max-steps",
         "240",
+        "--residual-mode",
+        "candidate_logits",
     ],
 }
 
@@ -131,6 +137,8 @@ def cmd_eval(args: argparse.Namespace) -> None:
         *PAPER_ABLATION_MODELS,
         "--scenarios",
         str(args.scenarios),
+        "--stress-scenarios",
+        str(args.scenarios),
         "--output-dir",
         str(args.ablation_dir),
         *train_flag,
@@ -162,12 +170,12 @@ def main() -> None:
     p_train.add_argument(
         "--models",
         nargs="+",
-        default=["residual_marl", "direct_discrete_rl", "mappo"],
+        default=["residual_marl", "residual_param", "residual_nominal", "direct_discrete_rl", "mappo"],
         choices=sorted(TRAIN_SPECS),
     )
     p_train.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_TRAIN_SEEDS)
     p_train.add_argument("--jobs", type=int, default=1)
-    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/paper_rerun"))
+    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/v2/paper_rerun"))
     p_train.add_argument("--overwrite", action="store_true")
     p_train.set_defaults(func=cmd_train)
 
@@ -183,7 +191,7 @@ def main() -> None:
     p_status.add_argument(
         "--models",
         nargs="+",
-        default=["residual_marl", "direct_discrete_rl", "mappo"],
+        default=["residual_marl", "residual_param", "residual_nominal", "direct_discrete_rl", "mappo"],
     )
     p_status.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_TRAIN_SEEDS)
     p_status.set_defaults(func=cmd_status)

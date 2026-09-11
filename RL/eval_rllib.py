@@ -54,7 +54,7 @@ def compute_residual_action(
 
 def record_rollout(env: TrafficMARLEnv, algo, explore: bool = False) -> dict[str, Any]:
     obs, _ = env.reset()
-    agent_list = sorted(env.agents)
+    agent_list = sorted(env.possible_agents, key=lambda aid: int(aid.split("_")[1]))
     n_agents = len(agent_list)
     positions: list[list[np.ndarray]] = [[] for _ in range(n_agents)]
     velocities: list[list[np.ndarray]] = [[] for _ in range(n_agents)]
@@ -71,7 +71,8 @@ def record_rollout(env: TrafficMARLEnv, algo, explore: bool = False) -> dict[str
     done = False
     while not done:
         actions = {}
-        for aid, o in obs.items():
+        for aid in env.agents:
+            o = obs[aid]
             actions[aid] = compute_residual_action(
                 algo, o, policy_id="shared_policy", explore=explore
             ).astype(np.float32)
@@ -81,7 +82,7 @@ def record_rollout(env: TrafficMARLEnv, algo, explore: bool = False) -> dict[str
             idx = int(aid.split("_")[1])
             positions[i].append(env._env.agents[idx].pos.copy())
             velocities[i].append(env._env.agents[idx].vel.copy())
-            residuals[i].append(actions[aid].copy())
+            residuals[i].append(actions.get(aid, np.zeros(env.action_spaces[aid].shape)).copy())
             controls[i].append(dict(env._env.agents[idx].prev_control))
 
     return {
@@ -106,7 +107,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("RL/checkpoints/rllib_ppo/checkpoint_final"),
+        default=Path("RL/checkpoints/v2/rllib_ppo/checkpoint_final"),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=240)
@@ -121,6 +122,7 @@ def main() -> None:
     algo_env_config = dict(getattr(algo.config, "env_config", {}) or {})
     algo_env_config.update(
         {
+            "obb_safety_filter": True,
             "seed": args.seed,
             "max_steps": args.max_steps,
             "num_agents": args.num_agents,

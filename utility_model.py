@@ -545,10 +545,16 @@ class TrafficAgent:
     heading_angle: float | None = None
     current_heading_vector: np.ndarray = field(default_factory=lambda: np.array([1.0, 0.0]))
     reached_destination: bool = False
+    # Kinematic speed cap (m/s). Defaults to desired_speed when omitted.
+    max_speed: float | None = None
     prev_accel: np.ndarray = field(default_factory=lambda: np.zeros(2))
     prev_control: dict[str, float] = field(default_factory=lambda: {"accel": 0.0, "steering": 0.0})
 
     def __post_init__(self) -> None:
+        if self.max_speed is None or not np.isfinite(self.max_speed) or float(self.max_speed) <= 0:
+            self.max_speed = float(max(self.desired_speed, 1.0))
+        else:
+            self.max_speed = float(self.max_speed)
         if self.heading_angle is None:
             speed = float(np.linalg.norm(self.vel))
             if speed > 1e-6:
@@ -599,6 +605,9 @@ class TrafficAgent:
         }
         if np.linalg.norm(self.pos - self.dest) < dest_threshold:
             self.reached_destination = True
+            self.vel = np.zeros(2, dtype=float)
+            self.prev_accel = np.zeros(2, dtype=float)
+            self.prev_control = {"accel": 0.0, "steering": 0.0}
 
     def update_state(self, new_pos: np.ndarray, new_vel: np.ndarray, dt: float, dest_threshold: float) -> None:
         """Legacy direct pos/vel update (kept for compatibility)."""
@@ -612,6 +621,8 @@ class TrafficAgent:
             self._sync_heading_vector()
         if np.linalg.norm(self.pos - self.dest) < dest_threshold:
             self.reached_destination = True
+            self.vel = np.zeros(2, dtype=float)
+            self.prev_accel = np.zeros(2, dtype=float)
 
 
 def kinematic_bicycle_rollout(
@@ -661,8 +672,20 @@ def generate_candidate_actions(
     agent: TrafficAgent,
     dt: float,
     sim_config: dict[str, Any],
+    *,
+    dedupe: bool = True,
 ) -> list[dict[str, Any]]:
-    """Discrete acceleration/steering candidates via kinematic bicycle rollout."""
+    """Discrete acceleration/steering candidates via kinematic bicycle rollout.
+
+    When ``dedupe`` is False the full accel×steer grid is returned in a fixed
+    order (required for candidate-logit residuals).  Calibration / legacy callers
+    keep the historical deduplicated list.
+    """
+    sim_config = dict(sim_config)
+    agent_vmax = getattr(agent, "max_speed", None)
+    if agent_vmax is not None and np.isfinite(agent_vmax) and float(agent_vmax) > 0:
+        sim_config["max_agent_speed"] = float(agent_vmax)
+
     accel_grid = sim_config.get("candidate_accel_grid", [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
     steering_grid = sim_config.get(
         "candidate_steering_grid",
@@ -672,6 +695,22 @@ def generate_candidate_actions(
     current_pos = agent.pos
     current_heading = float(agent.heading_angle)
     current_speed = agent.speed
+
+    # Already at destination: only the stop action.
+    dest_tol = float(sim_config.get("destination_threshold", 1.0))
+    if agent.reached_destination or np.linalg.norm(current_pos - agent.dest) < dest_tol:
+        agent.reached_destination = True
+        stay = kinematic_bicycle_rollout(
+            current_pos, current_heading, 0.0, 0.0, 0.0, dt, sim_config
+        )
+        stay["pos"] = np.array(current_pos, dtype=float)
+        stay["vel"] = np.zeros(2, dtype=float)
+        stay["speed"] = 0.0
+        stay["heading"] = current_heading
+        if dedupe:
+            return [stay]
+        # Fixed-size grid for residual indexing: repeat the stay action.
+        return [dict(stay) for _ in range(len(accel_grid) * len(steering_grid))]
 
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[float, float, float, float]] = set()
@@ -686,23 +725,17 @@ def generate_candidate_actions(
                 dt,
                 sim_config,
             )
-            key = (
-                round(float(cand["pos"][0]), 4),
-                round(float(cand["pos"][1]), 4),
-                round(float(cand["speed"]), 4),
-                round(float(cand["heading"]), 4),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
+            if dedupe:
+                key = (
+                    round(float(cand["pos"][0]), 3),
+                    round(float(cand["pos"][1]), 3),
+                    round(float(cand["heading"]), 3),
+                    round(float(cand["speed"]), 3),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
             candidates.append(cand)
-
-    if not candidates:
-        candidates.append(
-            kinematic_bicycle_rollout(
-                current_pos, current_heading, current_speed, 0.0, 0.0, dt, sim_config
-            )
-        )
     return candidates
 
 
@@ -852,6 +885,62 @@ def evaluate_candidate_utility(
     return util_dir + util_speed + util_dist - penalty_coll - penalty_path
 
 
+def n_candidate_actions(sim_config: dict[str, Any]) -> int:
+    """Size of the discrete accel × steering grid."""
+    return len(sim_config["candidate_accel_grid"]) * len(sim_config["candidate_steering_grid"])
+
+
+def emergency_brake_command(agent: TrafficAgent, sim_config: dict[str, Any]) -> tuple[float, float]:
+    """Hard deceleration used when the preferred command fails the OBB filter."""
+    max_accel = float(sim_config.get("max_accel", 4.0))
+    dt = max(float(sim_config.get("dt", 0.5)), 1e-6)
+    return float(np.clip(-agent.speed / dt, -max_accel, 0.0)), 0.0
+
+
+def control_command_obb_conflict(
+    agent_idx: int,
+    agent: TrafficAgent,
+    agents: list[TrafficAgent],
+    accel: float,
+    steering: float,
+    sim_config: dict[str, Any],
+) -> bool:
+    """True if the one-step bicycle command overlaps a CV-predicted neighbour OBB."""
+    if not sim_config.get("obb_safety_filter", True):
+        return False
+    cand = kinematic_bicycle_rollout(
+        agent.pos,
+        float(agent.heading),
+        float(agent.speed),
+        float(accel),
+        float(steering),
+        float(sim_config.get("dt", 0.5)),
+        sim_config,
+    )
+    return candidate_obb_conflict(cand, agent_idx, agents, sim_config)
+
+
+def sanitize_control_command(
+    agent_idx: int,
+    agent: TrafficAgent,
+    agents: list[TrafficAgent],
+    control: tuple[float, float],
+    sim_config: dict[str, Any],
+) -> tuple[float, float]:
+    """Shared closed-loop OBB safety filter used by training and the benchmark."""
+    if not sim_config.get("obb_safety_filter", True):
+        return control
+    accel, steering = control
+    if not control_command_obb_conflict(agent_idx, agent, agents, accel, steering, sim_config):
+        return accel, steering
+    safe = emergency_brake_command(agent, sim_config)
+    if not control_command_obb_conflict(agent_idx, agent, agents, safe[0], safe[1], sim_config):
+        return safe
+    # No verified command exists: retain maximum braking to reduce impact speed.
+    # This is an infeasible safety state, not a guarantee of collision avoidance.
+    return safe
+
+
 def select_best_candidate(
     agent_idx: int,
     agent: TrafficAgent,
@@ -861,25 +950,76 @@ def select_best_candidate(
 ) -> dict[str, Any]:
     """argmax_a U(a; Θ) over discrete candidate actions.
 
-    Prefer candidates whose predicted OBB does not overlap any neighbor; if every
-    candidate overlaps, fall back to the soft-utility maximizer (usually braking).
+    When ``obb_safety_filter`` is enabled (the default), prefer candidates whose
+    predicted OBB does not overlap any neighbor; if every candidate overlaps, fall
+    back to the soft-utility maximizer (usually braking).  With the filter off the
+    selection is the unfiltered utility argmax, so collisions remain reachable and
+    the utility parameters alone decide safety.
     """
-    candidates = generate_candidate_actions(agent, sim_config["dt"], sim_config)
+    chosen, _, _ = select_candidate_with_logit_residual(
+        agent_idx, agent, agents, params, sim_config, logit_residual=None
+    )
+    return chosen
+
+
+def select_candidate_with_logit_residual(
+    agent_idx: int,
+    agent: TrafficAgent,
+    agents: list[TrafficAgent],
+    params: dict[str, float],
+    sim_config: dict[str, Any],
+    logit_residual: np.ndarray | None = None,
+) -> tuple[dict[str, Any], int, int]:
+    """Select a candidate with optional additive residual on discrete utilities.
+
+    Returns ``(chosen, chosen_index, prior_index)`` where ``prior_index`` is the
+    argmax under ``U`` alone (same filter).  A nonzero residual changes the
+    executed control exactly when ``chosen_index != prior_index``.
+    """
+    candidates = generate_candidate_actions(
+        agent, sim_config["dt"], sim_config, dedupe=False
+    )
     context = build_step_context(agent_idx, agent, agents, sim_config)
-    best_free: dict[str, Any] | None = None
-    best_free_u = -float("inf")
-    best_any = candidates[0]
-    best_any_u = -float("inf")
-    for cand in candidates:
+    use_filter = bool(sim_config.get("obb_safety_filter", True))
+    n = len(candidates)
+    residuals = np.zeros(n, dtype=float)
+    if logit_residual is not None:
+        rr = np.asarray(logit_residual, dtype=float).reshape(-1)
+        if rr.size != n:
+            raise ValueError(f"logit residual dim {rr.size} != candidate grid {n}")
+        residuals = rr
+
+    best_free_idx: int | None = None
+    best_free_score = -float("inf")
+    best_any_idx = 0
+    best_any_score = -float("inf")
+    prior_free_idx: int | None = None
+    prior_free_u = -float("inf")
+    prior_any_idx = 0
+    prior_any_u = -float("inf")
+
+    for idx, cand in enumerate(candidates):
         u = evaluate_candidate_utility(
             agent_idx, agent, cand, agents, params, sim_config, context=context
         )
-        if u > best_any_u:
-            best_any_u = u
-            best_any = cand
-        if candidate_obb_conflict(cand, agent_idx, agents, sim_config, context=context):
+        score = float(u + residuals[idx])
+        if score > best_any_score:
+            best_any_score = score
+            best_any_idx = idx
+        if u > prior_any_u:
+            prior_any_u = u
+            prior_any_idx = idx
+        if use_filter and candidate_obb_conflict(
+            cand, agent_idx, agents, sim_config, context=context
+        ):
             continue
-        if u > best_free_u:
-            best_free_u = u
-            best_free = cand
-    return best_free if best_free is not None else best_any
+        if score > best_free_score:
+            best_free_score = score
+            best_free_idx = idx
+        if u > prior_free_u:
+            prior_free_u = u
+            prior_free_idx = idx
+
+    chosen_idx = best_free_idx if best_free_idx is not None else best_any_idx
+    prior_idx = prior_free_idx if prior_free_idx is not None else prior_any_idx
+    return candidates[chosen_idx], int(chosen_idx), int(prior_idx)

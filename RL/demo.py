@@ -14,13 +14,15 @@ from RL.traffic_env import EnvConfig, MultiAgentTrafficEnv
 
 try:
     import torch
-    from RL.train_ppo import TorchResidualPolicy
+    from RL.train_ppo import TorchResidualPolicy, action_space_from_blob, residual_mode_from_blob
 except ImportError:
     torch = None
     TorchResidualPolicy = None
 
 
 def run_rollout(env: MultiAgentTrafficEnv, policy=None, explore_std: float = 0.0) -> dict:
+    if policy is not None:
+        env.config.residual_mode = policy.residual_mode
     obs_list = env.reset()
     done = False
     rewards = []
@@ -48,7 +50,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
     parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
-    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/residual_policy.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/v2/residual_policy.pt"))
     args = parser.parse_args()
 
     base_params = None
@@ -70,14 +72,8 @@ def main() -> None:
         payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
     except TypeError:
         payload = torch.load(args.checkpoint, map_location="cpu")
-    policy = TorchResidualPolicy(
-        payload["obs_dim"],
-        hidden_dim=payload["hidden_dim"],
-        residual_scales=payload.get("residual_scales"),
-        highway_length=float(payload.get("highway_length", 500.0)),
-    )
-    policy.load_state_dict(payload["state_dict"], strict=False)
-    policy.eval()
+    from Baselines.residual_marl import load_residual_policy
+    policy = load_residual_policy(args.checkpoint, payload["obs_dim"], allow_legacy=True)
 
     residual_env = MultiAgentTrafficEnv(env_cfg, seed=args.seed)
     residual = run_rollout(residual_env, policy=policy, explore_std=0.0)

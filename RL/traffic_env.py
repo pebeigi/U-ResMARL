@@ -21,12 +21,15 @@ from RL.corridor import (
 )
 from RL.behavior_reference import FEATURES as BEHAVIOR_FEATURES
 from RL.behavior_reference import load_behavior_reference
-from RL.obs import contact_safety_reward, local_observation
+from RL.obs import local_observation, observation_dim
+from RL.transition import advance_agents
 from utility_model import (
     DEFAULT_BASE_PARAMS,
     DEFAULT_SIM_CONFIG,
     TrafficAgent,
-    select_best_candidate,
+    kinematic_bicycle_rollout,
+    sanitize_control_command,
+    select_candidate_with_logit_residual,
 )
 
 
@@ -62,6 +65,14 @@ class EnvConfig:
     behavior_csv: str | None = None
     sim_config: dict[str, Any] | None = None
     base_params: dict[str, float] | None = None
+    # ``candidate_logits``: residual adds to discrete utilities (default, continuous credit).
+    # ``param_delta``: residual edits Θ (legacy / ablation).
+    residual_mode: str = "candidate_logits"
+    # Terms that align the dense reward with leftover-distance / arrival metrics.
+    leftover_coef: float = 0.05
+    arrival_bonus: float = 5.0
+    # When set, overrides ``sim_config["obb_safety_filter"]`` (train default: False).
+    obb_safety_filter: bool | None = None
 
     def __post_init__(self) -> None:
         if self.reward_weights is None:
@@ -112,8 +123,12 @@ class EnvConfig:
             self.sim_config.setdefault("lane_kf", self.lane_kf)
             self.sim_config.setdefault("path_mode", "polyline")
             self.sim_config.setdefault("utility_frame", "corridor")
+        if self.obb_safety_filter is not None:
+            self.sim_config["obb_safety_filter"] = bool(self.obb_safety_filter)
         if self.base_params is None:
             self.base_params = dict(DEFAULT_BASE_PARAMS)
+        if self.residual_mode not in ("candidate_logits", "param_delta"):
+            raise ValueError(f"Unknown residual_mode={self.residual_mode!r}")
 
 
 class MultiAgentTrafficEnv:
@@ -139,13 +154,14 @@ class MultiAgentTrafficEnv:
 
     @property
     def obs_dim(self) -> int:
-        # [x, y, v, theta, theta_goal, clearance_lower, clearance_upper]
-        # + max_neighbors * [dx, dy, dvx, dvy]
-        k = self.config.sim_config["max_neighbors"]
-        return 7 + 4 * k
+        return observation_dim(int(self.config.sim_config["max_neighbors"]))
 
     @property
     def residual_dim(self) -> int:
+        if self.config.residual_mode == "candidate_logits":
+            from utility_model import n_candidate_actions
+
+            return n_candidate_actions(self.config.sim_config)
         return len(RESIDUAL_PARAM_KEYS)
 
     def reset(self) -> list[np.ndarray]:
@@ -218,7 +234,7 @@ class MultiAgentTrafficEnv:
         rp = self.config.sim_config["perception_radius"]
         neighbors: list[tuple[float, int]] = []
         for j, other in enumerate(self.agents):
-            if j == agent_idx:
+            if j == agent_idx or other.reached_destination:
                 continue
             d = float(np.linalg.norm(other.pos - ego.pos))
             if d <= rp:
@@ -228,128 +244,88 @@ class MultiAgentTrafficEnv:
         return [j for _, j in neighbors[:max_n]]
 
     def get_observation(self, agent_idx: int) -> np.ndarray:
-        """Frenet ego state + body-frame neighbors (see ``RL.obs.local_observation``)."""
+        """Frenet ego state + remaining station + body-frame neighbors."""
+        dest_s = (
+            self._dest_s[agent_idx]
+            if agent_idx < len(getattr(self, "_dest_s", []))
+            else None
+        )
         return local_observation(
             self.agents[agent_idx],
             self.agents,
             self.get_neighbors(agent_idx),
             self.corridor,
             int(self.config.sim_config["max_neighbors"]),
+            dest_s=dest_s,
         )
 
-    def _compute_reward(
-        self,
-        agent_idx: int,
-        accel: np.ndarray,
-        control: dict[str, float] | None = None,
-        candidate: dict[str, Any] | None = None,
-    ) -> float:
+    def _remaining_station(self, agent_idx: int) -> float:
         ego = self.agents[agent_idx]
-        w = self.config.reward_weights
-        sim = self.config.sim_config
-        steering_weight = float(sim.get("steering_penalty_weight", 0.5))
-
-        _, lateral, tangent, _, _ = self.corridor.project(ego.pos)
-        tangent_angle = float(np.arctan2(tangent[1], tangent[0]))
-        r_progress = ego.speed * np.cos(ego.heading - tangent_angle)
-
-        length = float(sim.get("vehicle_length", self.config.vehicle_length))
-        r_safety = 0.0
-        for j in self.get_neighbors(agent_idx):
-            d_ij = float(np.linalg.norm(self.agents[j].pos - ego.pos))
-            r_safety += contact_safety_reward(d_ij, length)
-
-        if control is not None:
-            a = float(control.get("accel", 0.0))
-            delta = float(control.get("steering", 0.0))
-            r_smooth = -(a**2 + steering_weight * delta**2)
-        else:
-            r_smooth = -float(np.sum(accel**2))
-
-        c_lo, c_hi, _ = self.corridor.clearances(ego.pos)
-        r_boundary, _ = boundary_reward(c_lo, c_hi)
-        r_traj = 0.0
-
-        r_behavior = 0.0
-        if self.behavior_reference is not None:
-            # Speed and acceleration come from the selected candidate so the term
-            # depends on this step's action; lateral offset is the current pose.
-            speed = float(candidate["speed"]) if candidate is not None else float(ego.speed)
-            step_accel = float(control.get("accel", 0.0)) if control is not None else 0.0
-            self._behavior_samples["speed"].append(speed)
-            self._behavior_samples["accel"].append(step_accel)
-            self._behavior_samples["lateral"].append(float(lateral))
-            if self.config.behavior_coef > 0.0:
-                r_behavior = -self.behavior_reference.step_deviation(speed, step_accel, lateral)
-
-        return (
-            w["progress"] * r_progress
-            + w["safety"] * r_safety
-            + w["smooth"] * r_smooth
-            + r_boundary
-            + w["traj"] * r_traj
-            + self.config.behavior_coef * r_behavior
+        s, _, _, _, _ = self.corridor.project(ego.pos)
+        dest_s = (
+            self._dest_s[agent_idx]
+            if agent_idx < len(getattr(self, "_dest_s", []))
+            else float(self.corridor.project(ego.dest)[0])
         )
+        return max(float(dest_s) - float(s), 0.0)
 
     def step(
         self,
-        residual_actions: list[dict[str, float]] | None = None,
+        residual_actions: list[Any] | None = None,
     ) -> tuple[list[np.ndarray], list[float], bool, dict[str, Any]]:
         if residual_actions is None:
-            residual_actions = [{} for _ in self.agents]
+            residual_actions = [None for _ in self.agents]
 
-        intended_moves: list[dict[str, Any] | None] = []
-        rewards: list[float] = []
-        selected_controls: list[dict[str, float]] = []
-        dt = self.config.sim_config["dt"]
-
+        if len(residual_actions) != len(self.agents):
+            raise ValueError("Expected one residual action per agent")
+        controls = []
+        flipped = considered = 0
         for i, agent in enumerate(self.agents):
             if agent.reached_destination:
-                hold = {
-                    "pos": agent.pos.copy(),
-                    "vel": agent.vel.copy(),
-                    "heading": agent.heading,
-                    "speed": agent.speed,
-                    "accel_longitudinal": 0.0,
-                    "steering_angle": 0.0,
-                    "time_to_reach": dt,
-                }
-                intended_moves.append(hold)
-                selected_controls.append({"accel": 0.0, "steering": 0.0})
-                rewards.append(0.0)
+                controls.append((0.0, 0.0))
                 continue
+            action = residual_actions[i]
+            residual = None
+            params = self.config.base_params
+            if self.config.residual_mode == "candidate_logits":
+                if action is not None:
+                    residual = np.asarray(action, dtype=float)
+            else:
+                if action is not None and not isinstance(action, dict):
+                    raise ValueError("param_delta actions must be parameter dictionaries")
+                params = apply_residual(params, action)
+            chosen, idx, prior_idx = select_candidate_with_logit_residual(
+                i, agent, self.agents, params, self.config.sim_config, residual)
+            considered += 1
+            flipped += int(idx != prior_idx)
+            controls.append((float(chosen["accel_longitudinal"]), float(chosen["steering_angle"])))
 
-            params = apply_residual(self.config.base_params, residual_actions[i])
-            chosen = select_best_candidate(i, agent, self.agents, params, self.config.sim_config)
-            control = {
-                "accel": float(chosen.get("accel_longitudinal", 0.0)),
-                "steering": float(chosen.get("steering_angle", 0.0)),
-            }
-            selected_controls.append(control)
-            rewards.append(
-                self._compute_reward(i, agent.prev_accel, control=control, candidate=chosen)
-            )
-            intended_moves.append(chosen)
-
-        for i, agent in enumerate(self.agents):
-            move = intended_moves[i]
-            if move is not None:
-                agent.update_state_from_candidate(
-                    move,
-                    dt,
-                    self.config.sim_config["destination_threshold"],
-                )
-            self._update_destination_flag(i)
-
-        hit = self._check_collisions()
-        if self.config.collision_penalty > 0.0 and hit:
-            penalty = float(self.config.collision_penalty)
-            for i in hit:
-                rewards[i] -= penalty
+        transition = advance_agents(
+            self.agents, controls, self.corridor, self.config.sim_config, self._dest_s,
+            reward_weights=self.config.reward_weights, leftover_coef=self.config.leftover_coef,
+            arrival_bonus=self.config.arrival_bonus, collision_penalty=self.config.collision_penalty,
+        )
+        rewards = transition.rewards
+        selected_controls = [{"accel": a, "steering": d} for a, d in transition.controls]
+        hit = transition.colliding_agents
+        self.collision_count += len(transition.collision_pairs)
         self.step_count += 1
+        if self.behavior_reference is not None:
+            for i, move in enumerate(transition.candidates):
+                if move is None or self.agents[i].reached_destination:
+                    continue
+                lateral = float(self.corridor.project(self.agents[i].pos)[1])
+                # Use realized acceleration, including speed-cap saturation.
+                accel = float(move["realized_accel"])
+                speed = float(move["speed"])
+                for key, value in (("speed", speed), ("accel", accel), ("lateral", lateral)):
+                    self._behavior_samples[key].append(value)
+                rewards[i] -= self.config.behavior_coef * self.behavior_reference.step_deviation(speed, accel, lateral)
 
         observations = [self.get_observation(i) for i in range(len(self.agents))]
-        done = self.step_count >= self.config.max_steps or all(a.reached_destination for a in self.agents)
+        truncated = self.step_count >= self.config.max_steps
+        all_arrived = all(a.reached_destination for a in self.agents)
+        done = truncated or all_arrived
 
         realism_distance = float("nan")
         if self.behavior_reference is not None:
@@ -358,8 +334,6 @@ class MultiAgentTrafficEnv:
                 self.config.behavior_shaping_coef > 0.0
                 and self.step_count > self.config.behavior_warmup_steps
             ):
-                # Potential-based shaping: the per-step increments telescope to the
-                # episode's realism distance, giving a dense signal for it.
                 previous = self._behavior_potential
                 if previous is not None:
                     shared = self.config.behavior_shaping_coef * (realism_distance - previous)
@@ -375,6 +349,10 @@ class MultiAgentTrafficEnv:
             "lane_kf": self.config.lane_kf,
             "colliding_agents": sorted(hit),
             "realism_distance": realism_distance,
+            "truncated": bool(truncated and not all_arrived),
+            "control_flips": int(flipped),
+            "control_decisions": int(considered),
+            "control_flip_rate": float(flipped / considered) if considered else 0.0,
         }
         return observations, rewards, done, info
 

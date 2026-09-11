@@ -12,6 +12,7 @@ from Baselines.controllers import Controller
 from Baselines.dynamics import apply_control, hold_still, project_and_clearances, sanitize_control
 from Baselines.scenario import Scenario
 from RL.corridor import boxes_overlap
+from RL.transition import advance_agents
 from utility_model import TrafficAgent
 
 
@@ -111,48 +112,13 @@ def rollout(
     for step in range(scenario.max_steps):
         controls = controller.compute_controls(agents, scenario, step)
 
-        step_accel = np.zeros(n)
-        step_steer = np.zeros(n)
-        for i, agent in enumerate(agents):
-            if agent.reached_destination:
-                hold_still(agent)
-                continue
-            accel, steering = controls[i]
-            accel, steering = sanitize_control(i, agent, agents, (float(accel), float(steering)), scenario)
-            apply_control(agent, (float(accel), float(steering)), scenario)
-            step_accel[i] = float(accel)
-            step_steer[i] = float(steering)
-
-        # Arrival by corridor progress (same rule as the RL environment).
-        for i, agent in enumerate(agents):
-            if agent.reached_destination:
-                hold_still(agent)
-                continue
-            s, _, _, _, _ = scenario.corridor.project(agent.pos)
-            if s >= dest_s[i] - tol:
-                agent.reached_destination = True
-                hold_still(agent)
-                arrival_step[i] = step + 1
-
-        # Oriented-box collisions between agents that are still driving.
-        current_pairs: set[tuple[int, int]] = set()
-        hit_this_step: set[int] = set()
-        for i in range(n):
-            if agents[i].reached_destination:
-                continue
-            for j in range(i + 1, n):
-                if agents[j].reached_destination:
-                    continue
-                if boxes_overlap(
-                    agents[i].pos,
-                    agents[i].heading,
-                    agents[j].pos,
-                    agents[j].heading,
-                    length=length,
-                    width=width,
-                ):
-                    current_pairs.add((i, j))
-                    hit_this_step.update((i, j))
+        transition = advance_agents(agents, controls, scenario.corridor, scenario.sim_config, dest_s)
+        step_accel = np.array([c[0] for c in transition.controls])
+        step_steer = np.array([c[1] for c in transition.controls])
+        for i in transition.arrived:
+            arrival_step[i] = step + 1
+        current_pairs = transition.collision_pairs
+        hit_this_step = transition.colliding_agents
         collision_events += len(current_pairs - active_pairs)
         collision_steps += len(current_pairs)
         colliding_agents.update(hit_this_step)
@@ -160,7 +126,7 @@ def rollout(
 
         p, h, v, lat, clr, sta = _agent_state(agents, scenario)
         for i in range(n):
-            if not agents[i].reached_destination and clr[i] < 0.0:
+            if transition.active_before[i] and clr[i] < 0.0:
                 offroad_steps += 1
                 offroad_agents.add(i)
 

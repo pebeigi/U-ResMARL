@@ -102,8 +102,10 @@ def apply_residual(
 def residual_scales_for_checkpoint(blob: dict[str, Any] | None) -> dict[str, float]:
     if blob is None:
         return dict(DEFAULT_RESIDUAL_SCALES)
+    scales = blob.get("residual_scales")
+    if str(blob.get("residual_mode", "")) == "candidate_logits" and isinstance(scales, dict):
+        return {str(k): float(v) for k, v in scales.items()}
     if blob.get("param_gauge") == PARAM_GAUGE:
-        scales = blob.get("residual_scales")
         if isinstance(scales, dict):
             return {k: float(scales[k]) for k in RESIDUAL_PARAM_KEYS if k in scales}
         return dict(DEFAULT_RESIDUAL_SCALES)
@@ -113,6 +115,8 @@ def residual_scales_for_checkpoint(blob: dict[str, Any] | None) -> dict[str, flo
     scales = blob.get("residual_scales") or {}
     if isinstance(scales, dict) and "S_v" in scales:
         return {k: float(scales[k]) for k in LEGACY_RESIDUAL_PARAM_KEYS if k in scales}
+    if isinstance(scales, dict) and scales and all(str(k).startswith("c") for k in scales):
+        return {str(k): float(v) for k, v in scales.items()}
     return dict(DEFAULT_RESIDUAL_SCALES)
 
 

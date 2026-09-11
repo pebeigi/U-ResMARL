@@ -28,6 +28,7 @@ import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
 from Baselines.dynamics import MAX_STEERING, observation, observation_dim, project_and_clearances
 from Baselines.nets import RunningNorm, mlp
+from RL.obs import adapt_observation
 from utility_model import TrafficAgent
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -45,9 +46,9 @@ ALGORITHMS = ("ippo", "mappo", "happo", "hatrpo")
 SEQUENTIAL_ALGORITHMS = ("happo", "hatrpo")
 
 DEFAULT_CHECKPOINTS = {
-    "mappo": Path("Baselines/checkpoints/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/hatrpo_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/v2/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/v2/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/v2/hatrpo_policy.pt"),
 }
 
 
@@ -168,6 +169,7 @@ class MARLPolicy(nn.Module):
         return action.cpu().numpy(), float(log_prob), float(value)
 
     def act(self, obs: np.ndarray, agent_idx: int) -> tuple[float, float]:
+        obs = adapt_observation(np.asarray(obs, dtype=np.float32), self.obs_dim)
         obs_t = torch.as_tensor(obs, dtype=torch.float32)
         with torch.no_grad():
             mean = self.actor_for(agent_idx)(self.obs_norm(obs_t))
@@ -177,7 +179,8 @@ class MARLPolicy(nn.Module):
 def save_marl_policy(policy: MARLPolicy, path: Path, extra: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = {
-        "state_dict": policy.state_dict(),
+        "protocol_version": 2,
+                "state_dict": policy.state_dict(),
         "obs_dim": policy.obs_dim,
         "num_agents": policy.num_agents,
         "hidden_dim": policy.hidden_dim,
@@ -191,6 +194,8 @@ def save_marl_policy(policy: MARLPolicy, path: Path, extra: dict | None = None) 
 
 def load_marl_policy(checkpoint: Path, obs_dim: int) -> MARLPolicy:
     blob = torch.load(checkpoint, map_location="cpu")
+    from RL.protocol import validate_checkpoint
+    validate_checkpoint(blob, obs_dim, checkpoint)
     policy = MARLPolicy(
         obs_dim=int(blob.get("obs_dim", obs_dim)),
         num_agents=int(blob["num_agents"]),
@@ -229,23 +234,14 @@ class MARLController(BaseController):
         self._warned = False
 
     def reset(self, scenario: "Scenario") -> None:
-        if self.policy is not None or self.checkpoint is None:
-            return
-        if not self.checkpoint.exists():
-            if not self._warned:
-                print(
-                    f"[{self.name}] checkpoint {self.checkpoint} not found; using an untrained "
-                    f"policy. Train it with: python -m Baselines.train_marl --algo {self.algo}"
-                )
-                self._warned = True
-            self.policy = MARLPolicy(
-                obs_dim=observation_dim(scenario),
-                num_agents=scenario.num_agents,
-                algo=self.algo,
-            )
-            self.policy.eval()
-            return
-        self.policy = load_marl_policy(self.checkpoint, observation_dim(scenario))
+        if self.policy is None:
+            if self.checkpoint is None or not self.checkpoint.exists():
+                raise FileNotFoundError(f"Missing trained checkpoint {self.checkpoint}; train before evaluation")
+            self.policy = load_marl_policy(self.checkpoint, observation_dim(scenario))
+        if self.policy.algo != self.algo:
+            raise ValueError(f"Expected {self.algo} checkpoint, got {self.policy.algo}")
+        if self.algo in SEQUENTIAL_ALGORITHMS and scenario.num_agents != self.policy.num_agents:
+            raise ValueError("HAPPO/HATRPO require the trained number of agent-specific actors")
 
     def compute_controls(
         self,

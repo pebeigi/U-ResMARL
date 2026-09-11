@@ -50,8 +50,10 @@ def report_residuals(args: argparse.Namespace) -> None:
         run_id=args.run_id,
         lane_kf=args.lane_kf,
     )
-    policy = load_residual_policy(args.checkpoint, observation_dim(scenario))
+    policy = load_residual_policy(args.checkpoint, observation_dim(scenario), allow_legacy=True)
 
+    keys = tuple(policy._residual_keys)
+    scales = policy.residual_scales.detach().cpu().numpy()
     samples: list[np.ndarray] = []
     for offset in range(args.scenarios):
         scenario = build_scenario(
@@ -71,7 +73,7 @@ def report_residuals(args: argparse.Namespace) -> None:
                 delta, _ = policy.act(
                     np.asarray(observation(agents, i, scenario), dtype=np.float32), 0.0
                 )
-                samples.append(np.array([float(delta[k]) for k in RESIDUAL_PARAM_KEYS]))
+                samples.append(np.array([float(delta[k]) for k in keys]) if isinstance(delta, dict) else np.asarray(delta, dtype=float))
             controls = controller.compute_controls(agents, scenario, 0)
             for i, control in enumerate(controls):
                 if not agents[i].reached_destination:
@@ -79,10 +81,13 @@ def report_residuals(args: argparse.Namespace) -> None:
 
     stack = np.asarray(samples)
     rows = []
-    for j, key in enumerate(RESIDUAL_PARAM_KEYS):
-        scale = float(DEFAULT_RESIDUAL_SCALES[key])
+    for j, key in enumerate(keys):
+        scale = float(scales[j])
         column = stack[:, j]
-        if key.startswith("z_"):
+        if policy.residual_mode == "candidate_logits":
+            base_val = 0.0
+            ref_label = "residual_base"
+        elif key.startswith("z_"):
             base_val = float(base_logits(base)[j])
             ref_label = "z_base"
         else:
