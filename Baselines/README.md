@@ -9,12 +9,34 @@ The method adapts a calibrated discrete utility controller with a learned
 residual. The shared conflict filter can reduce collisions; it does not guarantee
 collision-free motion. Safety and performance claims require the corrected runs.
 
-## Corrected experiment protocol (v2)
+## Hard road boundaries (v3)
+
+Road containment is enforced during training and evaluation for every controller,
+independently of `--no-obb-safety-filter` (which only disables car-to-car filtering).
+The whole oriented vehicle footprint must remain within the road polygon with a
+0.10 m margin. Candidate masks reject actions whose conservatively enclosed swept
+footprint leaves that region or whose successor lacks a straight braking backup.
+Continuous controls use the same filter, and the shared transition validates all
+moves before updating any agent. An infeasible state raises `BoundaryInfeasibleError`;
+it is not converted to an off-road step, teleported position, or artificial stop.
+
+The swept enclosure covers linear position/heading interpolation between the
+simulator's discrete bicycle poses. It is conservative and model-specific, not
+a certificate for a real vehicle or collision avoidance between moving vehicles.
+Off-road metrics now use the full footprint. Boundary constraints may reduce
+throughput; a zero off-road rate alone does not establish a better driving policy.
+
+Protocol v2 checkpoints/results remain historical. Retrain for v3 comparisons.
+The new Shapely dependency performs polygon containment and swept-envelope checks.
+The design follows [Nav2 footprint checking](https://docs.nav2.org/jazzy/configuration_and_development/configuration_guide/controller_plugins/dwb_controller/trajectory_critics/obstacle_footprint/)
+and the [DWA safe-stopping criterion](https://rse-lab.cs.washington.edu/abstracts/colli-ieee.abstract.html).
+
+## Corrected experiment protocol (v3)
 
 Historical checkpoints and results are preserved. They predate fixes to the
 simulation and learning targets and must not be used for new comparisons.
-New checkpoints go to `RL/checkpoints/v2/` and `Baselines/checkpoints/v2/`;
-new results go to `Baselines/results/v2/`. Evaluation rejects incompatible
+New checkpoints go to `RL/checkpoints/v3/` and `Baselines/checkpoints/v3/`;
+new results go to `Baselines/results/v3/`. Evaluation rejects incompatible
 checkpoints and requires every requested training seed.
 
 Training and evaluation share synchronous movement, pre-transition driving
@@ -48,8 +70,9 @@ standard deviations; bootstrap intervals are in the statistics CSV and CI table.
 
 ## Design
 
-The only thing that differs between models is the policy. Everything else is
-shared:
+Controllers share scenarios, dynamics, and evaluation metrics. The individual
+driving reward is shared by the matched PPO comparison; HAPPO/HATRPO use its
+team mean for their cooperative objective. Shared infrastructure:
 
 | Shared component | Where |
 | --- | --- |
@@ -119,7 +142,7 @@ forbids the side-by-side passing that a lane-free corridor is full of.
 | `pure_rl` | `pure_rl.py` | IPPO: independent PPO with a shared actor and a decentralised critic, mapping the observation directly to `(accel, steering)`. No utility function, no behavioural prior. The Gaussian lives in a normalised action space and observations are whitened by a running mean/variance estimate, so the baseline is not handicapped by scaling. |
 | `pure_rl_safe` | `pure_rl.py` | The same architecture trained with an explicit collision penalty on top of the shared reward. Included because the shared reward only discourages proximity softly, and pure RL exploits that: without the penalty it learns to reach every goal by driving through other vehicles. |
 | `mappo` | `marl.py` | MAPPO (Yu et al., NeurIPS 2022): shared actor, centralised critic on the joint corridor state, simultaneous PPO-clip updates. |
-| `happo` | `marl.py` | HAPPO (Kuba et al., ICLR 2022): one actor per agent, centralised critic, sequential updates in a random agent order with the multi-agent advantage factor that makes the scheme monotonic. |
+| `happo` | `marl.py` | HAPPO (Kuba et al., ICLR 2022): one actor per agent, centralised critic, sequential updates in a random agent order with the accumulated multi-agent probability-ratio factor. Finite-sample updates do not certify monotonic improvement. |
 | `hatrpo` | `marl.py` | HATRPO (Kuba et al., ICLR 2022): the same sequential scheme with a KL trust region per agent — conjugate-gradient natural gradient plus a backtracking line search — instead of clipping. |
 | `utility_pt` | `utility_prior.py` | Calibrated discrete utility controller (additive one-step planner) with no learning (`temperature=0` gives the deterministic argmax; `utility_pt_logit` samples from a logit choice model over the candidate set). |
 | `residual_marl` | `residual_marl.py` | The proposed model: same utility controller plus a learned residual. Default residual is an additive bias on the discrete candidate utilities (continuous credit); `--residual-mode param_delta` restores the older Θ residual for ablations. |
@@ -240,7 +263,7 @@ Useful flags:
 - `--residual-checkpoint`, `--pure-rl-checkpoint`, `--checkpoint-dir` — override checkpoint paths
 - `--no-realism`, `--no-figures` — skip the data-distribution metrics / plots
 
-Outputs land in `Baselines/results/v2/`:
+Outputs land in `Baselines/results/v3/`:
 
 - `benchmark_raw.csv` — one row per (model, scenario)
 - `benchmark_summary.csv` — mean and standard deviation per model
@@ -280,3 +303,34 @@ LABELS["my_model"] = "My model"
 ```
 
 It is then available via `--models my_model` with no other changes.
+
+## Baseline algorithm corrections
+
+MPPI is a bounded-sampling variant: it samples truncated Gaussian controls,
+weights them using the zero-mean reference/proposal density ratio, and updates
+with the weighted bounded controls. It never scores clipped controls and then
+updates from different raw perturbations. Proposal parameters are recentered on
+the resulting control mean (a bounded moment-update adaptation, not an exact
+unconstrained Gaussian projection). Scenario reset deterministically reseeds its
+sampler from controller and scenario seeds. SciPy supplies the Gaussian CDFs.
+
+Frenet jerk cost is integrated analytically over each candidate's own horizon;
+collision checks match neighbours to actual candidate times and exclude padding.
+Sampled Cartesian speed, total acceleration and curvature must satisfy the
+shared speed/acceleration limits and the bicycle steering limit. Finite-difference
+feasibility checks remain an approximation; execution retains the shared filters.
+
+DWA checks the proposed command followed by straight maximum braking to rest,
+including constant-velocity predicted neighbours, even beyond its scoring
+horizon. Neighbour geometry remains the documented Frenet-box approximation.
+No-admissible-candidate fallback brakes rather than choosing an unsafe accelerator.
+
+HAPPO/HATRPO optimize mean team driving reward. Their critic returns continue
+through individual arrivals until team termination or horizon truncation;
+inactive actors receive no policy updates, while their team-value targets remain
+trainable. HATRPO line search obeys the configured KL threshold without the old
+1.5 multiplier. Checkpoint metadata rejects pre-correction sequential policies.
+MAPPO/IPPO retain individual rewards; this distinction must be reported in tables.
+These fixes do not change the utility formulation or calibrated parameters.
+Old planner result tables must be regenerated. No full training run is launched
+by these implementation checks.

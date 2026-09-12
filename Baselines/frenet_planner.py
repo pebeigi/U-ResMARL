@@ -86,6 +86,52 @@ def _polyval(coeffs: np.ndarray, times: np.ndarray, derivative: int = 0) -> np.n
     return result
 
 
+def integrated_squared_jerk(coeffs, horizons):
+    """Exact jerk integral over each polynomial's own horizon."""
+    derivative = np.stack([coeffs[:, p] * p * (p - 1) * (p - 2)
+                           for p in range(3, coeffs.shape[1])], axis=1)
+    result = np.zeros(len(coeffs))
+    for i in range(derivative.shape[1]):
+        for j in range(derivative.shape[1]):
+            power = i + j + 1
+            result += derivative[:, i] * derivative[:, j] * horizons**power / power
+    return np.maximum(result, 0.)
+
+
+def cartesian_feasible(world, times, max_speed, max_accel, max_curvature):
+    """Check sampled Cartesian speed, total acceleration and curvature."""
+    feasible = np.ones(len(world), dtype=bool)
+    for k, path in enumerate(world):
+        unique = np.r_[True, np.diff(times[k]) > 1e-9]
+        t, xy = times[k, unique], path[unique]
+        if len(t) < 3:
+            feasible[k] = False
+            continue
+        velocity = np.gradient(xy, t, axis=0, edge_order=2)
+        acceleration = np.gradient(velocity, t, axis=0, edge_order=2)
+        speed = np.linalg.norm(velocity, axis=1)
+        cross = velocity[:, 0] * acceleration[:, 1] - velocity[:, 1] * acceleration[:, 0]
+        curvature = np.abs(cross) / np.maximum(speed**3, 1e-8)
+        feasible[k] = (np.max(speed) <= max_speed + 1e-6
+                       and np.max(np.linalg.norm(acceleration, axis=1)) <= max_accel + 1e-6
+                       and np.max(curvature) <= max_curvature + 1e-6)
+    return feasible
+
+
+def trajectory_collision_free(s_path, d_path, times, predictions, frame, length, width, dt):
+    """Match constant-velocity predictions to each candidate's own time support."""
+    if not predictions.shape[0]:
+        return np.ones(len(s_path), dtype=bool)
+    valid = np.diff(times, axis=1) > 1e-9
+    velocity = (predictions[:, 1] - predictions[:, 0]) / dt
+    predicted = predictions[None, :, :1, :] + velocity[None, :, None, :] * times[:, None, :, None]
+    shape = predicted.shape[:-1]
+    ns, nd, _ = frame.project_many(predicted.reshape(-1, 2))
+    separation = np.maximum(np.abs(s_path[:, None, :] - ns.reshape(shape)) - length,
+                            np.abs(d_path[:, None, :] - nd.reshape(shape)) - width)
+    return np.all(np.where(valid[:, None, :], separation[:, :, 1:] > 0, True), axis=(1, 2))
+
+
 class FrenetPlannerController(BaseController):
     """Sampled polynomial trajectories in corridor coordinates."""
 
@@ -205,32 +251,31 @@ class FrenetPlannerController(BaseController):
                 & (np.min(s_rate, axis=1) >= -0.1)
                 & (np.min(clearance[:, 1:], axis=1) >= 0.5 * scenario.vehicle_width)
             )
+            feasible &= cartesian_feasible(
+                world, times, max_speed,
+                min(self.max_accel, float(scenario.sim_config.get("max_accel", 4.))),
+                np.tan(.45) / float(scenario.sim_config.get("wheelbase", 2.8)))
 
             predictions = predict_neighbours(agents, i, steps, dt)
             if predictions.shape[0]:
-                shape = predictions.shape
-                n_station, n_lateral, _ = frame.project_many(predictions.reshape(-1, 2))
-                separation, _ = frenet_conflict(
-                    s_path,
-                    d_path,
-                    n_station.reshape(shape[0], shape[1]),
-                    n_lateral.reshape(shape[0], shape[1]),
+                # Match neighbours to each candidate's actual times, including a
+                # partial final interval. Ignore repeated padded endpoints.
+                feasible &= trajectory_collision_free(
+                    s_path, d_path, times, predictions, frame,
                     scenario.vehicle_length + self.safety_margin,
-                    scenario.vehicle_width + self.safety_margin,
-                )
-                feasible &= separation.min(axis=(1, 2)) > 0.0
+                    scenario.vehicle_width + self.safety_margin, dt)
 
             # The corridor has no lanes, so the reference the planner should hold
             # is the agent's own lateral position, with only a weak pull to the
             # centreline. Penalising |offset| alone crowds every agent onto d = 0.
             cost_lat = (
-                self.k_jerk * np.sum(lat_jerk**2, axis=1) * dt
+                self.k_jerk * integrated_squared_jerk(lat_coeffs, horizons)
                 + self.k_time * horizons
                 + self.k_offset * (offsets - float(d0)) ** 2
                 + self.k_centre * offsets**2
             )
             cost_lon = (
-                self.k_jerk * np.sum(lon_jerk**2, axis=1) * dt
+                self.k_jerk * integrated_squared_jerk(lon_coeffs, horizons)
                 + self.k_time * horizons
                 + self.k_speed * (target_speed - float(agent.desired_speed)) ** 2
             )

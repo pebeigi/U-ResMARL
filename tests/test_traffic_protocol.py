@@ -97,6 +97,8 @@ class SafetyAndPlannerTest(unittest.TestCase):
 
     def test_disabled_filter_does_not_mask_direct_actions(self):
         scenario = build_scenario(0, num_agents=2, max_steps=1, obb_safety_filter=False)
+        # This test isolates the car-to-car filter. Road containment has its own mask.
+        scenario.sim_config["boundary_safety_filter"] = False
         agents = scenario.spawn_agents()
         for i, agent in enumerate(agents):
             agent.pos, tangent = scenario.corridor.xy_from_frenet(40 + 5 * i, 0)
@@ -220,7 +222,7 @@ class CheckpointAndAblationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "predates"):
             validate_checkpoint({"obs_dim": 32}, 32, "old.pt")
         with self.assertRaisesRegex(ValueError, "observation"):
-            validate_checkpoint({"protocol_version": 2, "obs_dim": 31}, 32, "old_obs.pt")
+            validate_checkpoint({"protocol_version": 3, "obs_dim": 31}, 32, "old_obs.pt")
 
     def test_partial_seed_sets_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -237,7 +239,7 @@ class CheckpointAndAblationTest(unittest.TestCase):
     def test_parameter_ablation_rejects_candidate_checkpoint(self):
         from RL.train_ppo import TorchResidualPolicy
         policy = TorchResidualPolicy(32, hidden_dim=8)
-        blob = {"protocol_version": 2, "state_dict": policy.state_dict(), "obs_dim": 32,
+        blob = {"protocol_version": 3, "state_dict": policy.state_dict(), "obs_dim": 32,
                 "hidden_dim": 8, "residual_mode": "candidate_logits", "action_dim": 63,
                 "action_space": "squashed_tanh", "param_gauge": "logit_simplex"}
         with tempfile.TemporaryDirectory() as tmp:

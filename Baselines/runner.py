@@ -65,7 +65,9 @@ def _agent_state(
         s, lateral, _, c_lo, c_hi = project_and_clearances(scenario.corridor, a.pos)
         sta[i] = s
         lat[i] = lateral
-        clr[i] = min(c_lo, c_hi)
+        from RL.boundary import footprint_clearance
+        clr[i] = footprint_clearance(scenario.corridor, a.pos, a.heading,
+                                     scenario.vehicle_length, scenario.vehicle_width)
     return pos, head, spd, lat, clr, sta
 
 

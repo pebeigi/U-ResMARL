@@ -1,6 +1,6 @@
 """Versioned experiment contract; pre-fix checkpoints remain historical artifacts."""
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 
 def validate_checkpoint(blob, obs_dim, path):

@@ -309,6 +309,8 @@ def corridor_sim_defaults(corridor: HighwayCorridor) -> dict[str, Any]:
         "path_mode": "polyline",
         "utility_frame": "corridor",
         "boundary_buffer": 1.5,
+        "boundary_safety_filter": True,
+        "boundary_margin": 0.1,
         "road_x_min": float(xs.min()),
         "road_x_max": float(xs.max()),
         "road_y_min": float(ys.min()),

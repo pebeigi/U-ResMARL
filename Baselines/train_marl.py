@@ -1,7 +1,7 @@
 """Train the cooperative MARL baselines: MAPPO, HAPPO, HATRPO (and IPPO).
 
-Same scenarios, same dynamics, same reward as the residual model; only the
-algorithm differs.
+Same scenarios and dynamics as the residual model. MAPPO/IPPO retain individual
+driving rewards; HAPPO/HATRPO optimize their shared team mean.
 
     python -m Baselines.train_marl --algo mappo  --updates 200
     python -m Baselines.train_marl --algo happo  --updates 200
@@ -61,6 +61,7 @@ class Episode:
     stats: dict = field(default_factory=dict)
     bootstrap_values: np.ndarray | None = None
     truncated: np.ndarray | None = None  # Per-agent horizon ends, excluding arrivals.
+    cooperative: bool = False
 
 
 def collect_episode(
@@ -97,7 +98,7 @@ def collect_episode(
         controls: dict[int, tuple[float, float]] = {}
 
         for i, agent in enumerate(agents):
-            if agent.reached_destination:
+            if agent.reached_destination and policy.algo not in SEQUENTIAL_ALGORITHMS:
                 continue
             obs = observation(agents, i, scenario)
             state = (
@@ -111,8 +112,9 @@ def collect_episode(
             step_action[i] = action
             step_logp[i] = log_prob
             step_value[i] = value
-            step_mask[i] = 1.0
-            controls[i] = policy.to_control(action)
+            step_mask[i] = float(not agent.reached_destination)
+            if not agent.reached_destination:
+                controls[i] = policy.to_control(action)
 
         transition = advance_agents(
             agents, [controls.get(i, (0.0, 0.0)) for i in range(n)],
@@ -121,6 +123,8 @@ def collect_episode(
         )
         collisions += len(transition.collision_pairs)
         step_reward[:] = transition.rewards
+        if policy.algo in SEQUENTIAL_ALGORITHMS:
+            step_reward[:] = float(np.mean(transition.rewards))
 
         obs_buf.append(step_obs)
         state_buf.append(step_state)
@@ -136,7 +140,8 @@ def collect_episode(
     if steps >= scenario.max_steps:
         features = agent_features(agents, scenario)
         for i, agent in enumerate(agents):
-            if not agent.reached_destination:
+            if not agent.reached_destination or (policy.algo in SEQUENTIAL_ALGORITHMS
+                                                 and not all(a.reached_destination for a in agents)):
                 truncated[i] = True
                 obs = observation(agents, i, scenario)
                 state = centralised_state(features, obs, policy.num_agents) if policy.centralised else obs
@@ -153,6 +158,7 @@ def collect_episode(
         masks=np.asarray(mask_buf),
         bootstrap_values=bootstrap,
         truncated=truncated,
+        cooperative=policy.algo in SEQUENTIAL_ALGORITHMS,
         stats={
             "reward": float(np.sum(reward_buf) / max(n, 1)),
             "collisions": float(collisions),
@@ -167,7 +173,10 @@ def episode_gae(episode: Episode, gamma: float, gae_lambda: float) -> tuple[np.n
     advantages = np.zeros_like(episode.rewards)
     returns = np.zeros_like(episode.rewards)
     for i in range(episode.rewards.shape[1]):
-        idx = np.flatnonzero(episode.masks[:, i])
+        # Team returns continue after an individual arrival: its earlier action
+        # can affect the remaining agents. Actor updates still mask inactive rows.
+        idx = (np.arange(len(episode.rewards)) if episode.cooperative
+               else np.flatnonzero(episode.masks[:, i]))
         if not len(idx):
             continue
         dones = np.zeros(len(idx), dtype=np.float32)
@@ -194,6 +203,7 @@ class Batch:
     advantages: torch.Tensor
     returns: torch.Tensor
     masks: torch.Tensor
+    critic_masks: torch.Tensor | None = None
 
 
 def build_batch(episodes: list[Episode], gamma: float, gae_lambda: float) -> Batch:
@@ -213,7 +223,7 @@ def build_batch(episodes: list[Episode], gamma: float, gae_lambda: float) -> Bat
     valid = masks > 0
     if valid.any():
         mean = adv[valid].mean()
-        std = adv[valid].std().clamp_min(1e-6)
+        std = adv[valid].std(unbiased=False).clamp_min(1e-6)
         adv = (adv - mean) / std * masks
 
     return Batch(
@@ -224,6 +234,9 @@ def build_batch(episodes: list[Episode], gamma: float, gae_lambda: float) -> Bat
         advantages=adv,
         returns=torch.as_tensor(np.concatenate(returns, axis=0), dtype=torch.float32),
         masks=masks,
+        critic_masks=torch.as_tensor(np.concatenate([
+            np.ones_like(e.masks) if e.cooperative else e.masks for e in episodes
+        ], axis=0), dtype=torch.float32),
     )
 
 
@@ -241,7 +254,7 @@ def update_critic(
 ) -> float:
     states = batch.states.reshape(-1, batch.states.shape[-1])
     returns = batch.returns.reshape(-1)
-    masks = batch.masks.reshape(-1)
+    masks = (batch.critic_masks if batch.critic_masks is not None else batch.masks).reshape(-1)
     index = np.flatnonzero(masks.numpy() > 0)
     if index.size == 0:
         return 0.0
@@ -311,7 +324,7 @@ def update_actors_happo(
     """HAPPO: sequential per-agent clipped updates with the multi-agent factor.
 
     The factor accumulates the probability ratios of the agents already updated
-    in this pass, which is what makes the sequential scheme monotonic.
+    in this pass. Finite-sample clipped updates do not certify monotonic improvement.
     """
     factor = torch.ones(batch.obs.shape[0], dtype=torch.float32)
     order = np.random.permutation(policy.num_agents)
@@ -478,7 +491,7 @@ def update_actors_hatrpo(
             improvement = new_loss - old_loss
             expected = expected_improvement * fraction
             improvement_ratio = improvement / expected if abs(expected) > 1e-12 else 0.0
-            if kl <= kl_limit * 1.5 and improvement > 0 and improvement_ratio > args.accept_ratio:
+            if kl <= kl_limit and improvement > 0 and improvement_ratio > args.accept_ratio:
                 accepted = True
                 stats = {"policy_loss": -new_loss, "kl": kl}
                 break
@@ -559,7 +572,7 @@ def train(args: argparse.Namespace) -> None:
         )
 
         policy.obs_norm.update(batch.obs[batch.masks > 0])
-        policy.state_norm.update(batch.states[batch.masks > 0])
+        policy.state_norm.update(batch.states[batch.critic_masks > 0])
 
         mean_reward = float(np.mean([e.stats["reward"] for e in episodes]))
         mean_collisions = float(np.mean([e.stats["collisions"] for e in episodes]))
@@ -630,7 +643,7 @@ def main() -> None:
     parser.add_argument("--train-obb-filter", action="store_true")
     args = parser.parse_args()
     if args.save is None:
-        args.save = Path(f"Baselines/checkpoints/v2/{args.algo}_policy.pt")
+        args.save = Path(f"Baselines/checkpoints/v3/{args.algo}_policy.pt")
     args.max_kl = torch.tensor(float(args.max_kl))
     train(args)
 

@@ -31,9 +31,9 @@ from Baselines.ablation_models import (
 )
 from Baselines.registry import LEARNED_CHECKPOINTS, seed_checkpoint
 
-PAPER_OUTPUT = Path("Baselines/results/v2/paper_rerun")
-ABLATION_OUTPUT = Path("Baselines/results/v2/paper_ablation")
-STRESS_OUTPUT = Path("Baselines/results/v2/paper_stress")
+PAPER_OUTPUT = Path("Baselines/results/v3/paper_rerun")
+ABLATION_OUTPUT = Path("Baselines/results/v3/paper_ablation")
+STRESS_OUTPUT = Path("Baselines/results/v3/paper_stress")
 
 TRAIN_SPECS: dict[str, list[str]] = {
     "residual_param": ["--updates", "100", "--max-steps", "240", "--collision-penalty", "8", "--residual-mode", "param_delta"],
@@ -175,7 +175,7 @@ def main() -> None:
     )
     p_train.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_TRAIN_SEEDS)
     p_train.add_argument("--jobs", type=int, default=1)
-    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/v2/paper_rerun"))
+    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/v3/paper_rerun"))
     p_train.add_argument("--overwrite", action="store_true")
     p_train.set_defaults(func=cmd_train)
 

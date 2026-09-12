@@ -56,3 +56,19 @@ The shared OBB filter is a heuristic, not a proof of collision avoidance. If bot
 the requested control and the braking candidate are infeasible, the fallback
 brakes rather than coasts. Report empirical safety and residual usage after full
 retraining; passing implementation tests does not establish a performance gain.
+
+## Road containment (protocol v3)
+
+A 0.10 m road-polygon margin now constrains the full vehicle footprint, its swept
+interpolation between discrete poses, and a straight braking backup. This filter
+is active in both training and evaluation, independently of car-to-car filtering.
+Utility and direct-RL masks use the same predicate. Continuous commands are
+filtered at execution; the shared step validates all agents before committing.
+If no feasible command exists, the step raises an explicit error without moving
+any agent. Off-road metrics include body overhang. This changes the experiment
+contract: v2 artifacts are historical and new runs use v3 directories/checkpoints.
+
+The brake uses an acceleration available on the discrete grid, ensuring the
+reserved backup can be selected on the next step. Closed-loop utility candidate
+prediction now uses the same speed cap as execution; historical calibration
+candidate generation retains its previous per-agent speed limit.

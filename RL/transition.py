@@ -77,6 +77,12 @@ def advance_agents(agents, controls, corridor, sim, dest_s, *, reward_weights=No
         rewards.append(driving_reward(agents, i, corridor, sim, dest_s[i], control,
                                       reward_weights, leftover_coef))
 
+    # Atomic check using the actual scenario geometry before any agent moves.
+    from RL.boundary import candidate_boundary_safe, BoundaryInfeasibleError
+    for i, move in enumerate(moves):
+        if active[i] and not candidate_boundary_safe(agents[i], move, sim, corridor):
+            raise BoundaryInfeasibleError(f"Agent {i}: boundary validation failed; state was not advanced")
+
     arrived = set()
     tol = float(sim.get("destination_threshold", 1.0))
     for i, agent in enumerate(agents):

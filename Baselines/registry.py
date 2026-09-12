@@ -35,7 +35,7 @@ RESIDUAL_INFERENCE_VARIANTS = frozenset({"residual_marl"})
 
 def _residual_param(**kwargs: Any) -> Controller:
     from Baselines.residual_marl import ResidualMARLController
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
     kwargs.setdefault("name", "residual_param")
     return ResidualMARLController(**kwargs)
 
@@ -58,7 +58,7 @@ def _residual_sigma_frozen(**kwargs: Any) -> Controller:
     """Legacy name: freeze collision-kernel shape residuals (sigma only at base)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_sigma_frozen")
     return ResidualMARLController(**kwargs)
@@ -71,7 +71,7 @@ def _residual_weights_only(**kwargs: Any) -> Controller:
     """
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_weights_only")
     return ResidualMARLController(**kwargs)
@@ -81,7 +81,7 @@ def _residual_sigma_only(**kwargs: Any) -> Controller:
     """Freeze amplitude logits and non-sigma shape; only sigma_* may adapt."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", AMPLITUDE_LOGIT_KEYS + _SHAPE_EXCEPT_SIGMA)
     kwargs.setdefault("name", "residual_sigma_only")
     return ResidualMARLController(**kwargs)
@@ -91,7 +91,7 @@ def _residual_nominal(**kwargs: Any) -> Controller:
     """Residual on the uncalibrated nominal prior (tests calibration importance)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_nominal_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_nominal_policy.pt"))
     kwargs.setdefault("prefer", "nominal")
     kwargs.setdefault("name", "residual_nominal")
     return ResidualMARLController(**kwargs)
@@ -101,7 +101,7 @@ def _residual_collpen(**kwargs: Any) -> Controller:
     """Residual trained with an OBB collision penalty (sparse training by default)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_collpen_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_collpen_policy.pt"))
     kwargs.setdefault("name", "residual_collpen")
     return ResidualMARLController(**kwargs)
 
@@ -110,7 +110,7 @@ def _residual_collpen_dense(**kwargs: Any) -> Controller:
     """Collision-penalty residual trained under dense spawn (stress distribution)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"))
     kwargs.setdefault("name", "residual_collpen_dense")
     return ResidualMARLController(**kwargs)
 
@@ -161,7 +161,7 @@ def _pure_rl_safe(**kwargs: Any) -> Controller:
     """Pure RL trained with an explicit collision penalty added to the shared reward."""
     from Baselines.pure_rl import PureRLController
 
-    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/v2/pure_rl_safe_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/v3/pure_rl_safe_policy.pt"))
     kwargs.setdefault("name", "pure_rl_safe")
     return PureRLController(**kwargs)
 
@@ -247,20 +247,20 @@ LABELS = {
 # Models whose behavior depends on a training seed, with the checkpoint that a
 # single-seed run writes. Seeded runs append "_seed<k>" to the stem.
 LEARNED_CHECKPOINTS: dict[str, Path] = {
-    "residual_marl": Path("RL/checkpoints/v2/residual_policy.pt"),
-    "residual_sigma_frozen": Path("RL/checkpoints/v2/residual_param_policy.pt"),
-    "residual_weights_only": Path("RL/checkpoints/v2/residual_param_policy.pt"),
-    "residual_sigma_only": Path("RL/checkpoints/v2/residual_param_policy.pt"),
-    "residual_nominal": Path("RL/checkpoints/v2/residual_nominal_policy.pt"),
-    "residual_param": Path("RL/checkpoints/v2/residual_param_policy.pt"),
-    "residual_collpen": Path("RL/checkpoints/v2/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"),
-    "pure_rl": Path("Baselines/checkpoints/v2/pure_rl_policy.pt"),
-    "direct_discrete_rl": Path("Baselines/checkpoints/v2/direct_discrete_policy.pt"),
-    "pure_rl_safe": Path("Baselines/checkpoints/v2/pure_rl_safe_policy.pt"),
-    "mappo": Path("Baselines/checkpoints/v2/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/v2/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/v2/hatrpo_policy.pt"),
+    "residual_marl": Path("RL/checkpoints/v3/residual_policy.pt"),
+    "residual_sigma_frozen": Path("RL/checkpoints/v3/residual_param_policy.pt"),
+    "residual_weights_only": Path("RL/checkpoints/v3/residual_param_policy.pt"),
+    "residual_sigma_only": Path("RL/checkpoints/v3/residual_param_policy.pt"),
+    "residual_nominal": Path("RL/checkpoints/v3/residual_nominal_policy.pt"),
+    "residual_param": Path("RL/checkpoints/v3/residual_param_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/v3/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"),
+    "pure_rl": Path("Baselines/checkpoints/v3/pure_rl_policy.pt"),
+    "direct_discrete_rl": Path("Baselines/checkpoints/v3/direct_discrete_policy.pt"),
+    "pure_rl_safe": Path("Baselines/checkpoints/v3/pure_rl_safe_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/v3/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/v3/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/v3/hatrpo_policy.pt"),
 }
 
 

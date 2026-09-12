@@ -125,6 +125,8 @@ class EnvConfig:
             self.sim_config.setdefault("utility_frame", "corridor")
         if self.obb_safety_filter is not None:
             self.sim_config["obb_safety_filter"] = bool(self.obb_safety_filter)
+        self.sim_config.setdefault("boundary_safety_filter", True)
+        self.sim_config.setdefault("boundary_margin", 0.1)
         if self.base_params is None:
             self.base_params = dict(DEFAULT_BASE_PARAMS)
         if self.residual_mode not in ("candidate_logits", "param_delta"):
@@ -201,6 +203,15 @@ class MultiAgentTrafficEnv:
                     lane_kf=self.config.lane_kf,
                 )
             )
+            from RL.boundary import footprint_clearance
+            agent = agents[-1]
+            if footprint_clearance(self.corridor, agent.pos, agent.heading,
+                                   self.config.sim_config["vehicle_length"],
+                                   self.config.sim_config["vehicle_width"]) < self.config.sim_config["boundary_margin"]:
+                # Heading noise must not invalidate a verified spawn footprint.
+                agent.heading_angle = float(np.arctan2(tangent[1], tangent[0]))
+                agent.vel = speed * tangent
+                agent._sync_heading_vector()
         return agents
 
     def _sample_start_pose(
@@ -221,13 +232,23 @@ class MultiAgentTrafficEnv:
             pos, tangent = self.corridor.xy_from_frenet(s, lateral)
             if not self.corridor.inside(pos, margin=margin):
                 continue
+            from RL.boundary import footprint_clearance
+            if footprint_clearance(self.corridor, pos, float(np.arctan2(tangent[1], tangent[0])),
+                                   self.config.vehicle_length, self.config.vehicle_width) < self.config.sim_config["boundary_margin"]:
+                continue
             if all(
                 np.linalg.norm(pos - agent.pos) >= self.config.min_initial_spacing
                 for agent in existing_agents
             ):
                 return pos, tangent, s
-        pos, tangent = self.corridor.xy_from_frenet(float(self.rng.uniform(s_lo, s_hi)), 0.0)
-        return pos, tangent, float(self.corridor.project(pos)[0])
+        # Spacing remains best-effort as in the historical sampler, but the
+        # fallback may never violate footprint containment.
+        for _ in range(300):
+            pos, tangent = self.corridor.xy_from_frenet(float(self.rng.uniform(s_lo, s_hi)), 0.0)
+            if footprint_clearance(self.corridor, pos, float(np.arctan2(tangent[1], tangent[0])),
+                                   self.config.vehicle_length, self.config.vehicle_width) >= self.config.sim_config["boundary_margin"]:
+                return pos, tangent, float(self.corridor.project(pos)[0])
+        raise ValueError("Unable to spawn a road-contained vehicle")
 
     def get_neighbors(self, agent_idx: int) -> list[int]:
         ego = self.agents[agent_idx]

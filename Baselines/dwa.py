@@ -33,6 +33,43 @@ def _normalise(values: np.ndarray) -> np.ndarray:
     return values / total
 
 
+def braking_admissible(agent, agents, agent_idx, accels, steerings, scenario):
+    """Proposed step followed by straight maximum braking to a complete stop.
+
+    Neighbours retain the planner's constant-velocity/Frenet-box approximation.
+    Road containment uses the shared full-footprint predicate.
+    """
+    from RL.boundary import candidate_boundary_safe
+    from utility_model import kinematic_bicycle_rollout
+    decel = float(scenario.sim_config.get("max_accel", 4.))
+    dt = float(scenario.dt)
+    next_speed = np.clip(agent.speed + accels * dt, 0., scenario.sim_config["max_agent_speed"])
+    horizon = 1 + int(np.ceil(float(next_speed.max()) / (decel * dt)))
+    braking = np.full((len(accels), horizon), -decel)
+    turning = np.zeros_like(braking)
+    braking[:, 0], turning[:, 0] = accels, steerings
+    traj, _, _ = simulate_bicycle_batch(agent.pos, agent.heading, agent.speed,
+                                       braking, turning, scenario)
+    station_now = scenario.corridor.project(agent.pos)[0]
+    frame = build_local_frame(scenario.corridor, station_now,
+                              ahead=float(next_speed.max()) * dt * horizon + 20.)
+    station, lateral, _ = frame.project_many(traj.reshape(-1, 2))
+    valid = np.ones(len(accels), dtype=bool)
+    predictions = predict_neighbours(agents, agent_idx, horizon, dt)
+    if predictions.shape[0]:
+        ns, nd, _ = frame.project_many(predictions.reshape(-1, 2))
+        separation, _ = frenet_conflict(
+            station.reshape(len(accels), -1), lateral.reshape(len(accels), -1),
+            ns.reshape(predictions.shape[:2]), nd.reshape(predictions.shape[:2]),
+            scenario.vehicle_length, scenario.vehicle_width)
+        valid &= separation.min(axis=(1, 2)) > 0.
+    for k in np.flatnonzero(valid):
+        candidate = kinematic_bicycle_rollout(agent.pos, agent.heading, agent.speed,
+                    accels[k], steerings[k], dt, scenario.sim_config)
+        valid[k] = candidate_boundary_safe(agent, candidate, scenario.sim_config, scenario.corridor)
+    return valid
+
+
 class DWAController(BaseController):
     """Sample the dynamic window, score by heading / clearance / velocity."""
 
@@ -160,10 +197,10 @@ class DWAController(BaseController):
                 ]
             )
             admissible = admissible & obb_ok
+            admissible &= braking_admissible(agent, agents, i, accels, steerings, scenario)
             if not np.any(admissible):
-                # Everything is unsafe: fall back to the safest command.
-                best = int(np.argmax(clearance_score))
-                controls.append((float(accels[best]), float(steerings[best])))
+                # Infeasibility is not permission to accelerate into an obstacle.
+                controls.append((-float(scenario.sim_config.get("max_accel", 4.)), 0.))
                 continue
 
             velocity_score = speeds[:, -1]

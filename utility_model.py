@@ -683,7 +683,8 @@ def generate_candidate_actions(
     """
     sim_config = dict(sim_config)
     agent_vmax = getattr(agent, "max_speed", None)
-    if agent_vmax is not None and np.isfinite(agent_vmax) and float(agent_vmax) > 0:
+    if (not sim_config.get("boundary_safety_filter", False)
+            and agent_vmax is not None and np.isfinite(agent_vmax) and float(agent_vmax) > 0):
         sim_config["max_agent_speed"] = float(agent_vmax)
 
     accel_grid = sim_config.get("candidate_accel_grid", [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
@@ -928,12 +929,14 @@ def sanitize_control_command(
     sim_config: dict[str, Any],
 ) -> tuple[float, float]:
     """Shared closed-loop OBB safety filter used by training and the benchmark."""
+    from RL.boundary import filter_boundary_control
+    control = filter_boundary_control(agent, control, sim_config)
     if not sim_config.get("obb_safety_filter", True):
         return control
     accel, steering = control
     if not control_command_obb_conflict(agent_idx, agent, agents, accel, steering, sim_config):
         return accel, steering
-    safe = emergency_brake_command(agent, sim_config)
+    safe = filter_boundary_control(agent, emergency_brake_command(agent, sim_config), sim_config)
     if not control_command_obb_conflict(agent_idx, agent, agents, safe[0], safe[1], sim_config):
         return safe
     # No verified command exists: retain maximum braking to reduce impact speed.
@@ -999,6 +1002,9 @@ def select_candidate_with_logit_residual(
     prior_any_u = -float("inf")
 
     for idx, cand in enumerate(candidates):
+        from RL.boundary import candidate_boundary_safe
+        if not candidate_boundary_safe(agent, cand, sim_config):
+            continue
         u = evaluate_candidate_utility(
             agent_idx, agent, cand, agents, params, sim_config, context=context
         )
@@ -1020,6 +1026,9 @@ def select_candidate_with_logit_residual(
             prior_free_u = u
             prior_free_idx = idx
 
+    if not np.isfinite(best_any_score):
+        from RL.boundary import BoundaryInfeasibleError
+        raise BoundaryInfeasibleError("No boundary-feasible utility candidate; state was not advanced")
     chosen_idx = best_free_idx if best_free_idx is not None else best_any_idx
     prior_idx = prior_free_idx if prior_free_idx is not None else prior_any_idx
     return candidates[chosen_idx], int(chosen_idx), int(prior_idx)

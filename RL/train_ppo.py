@@ -900,7 +900,7 @@ def train(args: argparse.Namespace) -> None:
         else:
             scales_blob = {k: float(DEFAULT_RESIDUAL_SCALES[k]) for k in RESIDUAL_PARAM_KEYS}
         blob = {
-            "protocol_version": 2,
+            "protocol_version": 3,
                 "state_dict": policy.state_dict(),
             "obs_dim": probe_env.obs_dim,
             "hidden_dim": args.hidden_dim,
@@ -916,6 +916,8 @@ def train(args: argparse.Namespace) -> None:
             "calibration": str(args.calibration) if args.calibration else None,
             "base_params": dict(probe_env.config.base_params),
             "train_obb_filter": bool(probe_env.config.sim_config["obb_safety_filter"]),
+            "boundary_safety_filter": bool(probe_env.config.sim_config["boundary_safety_filter"]),
+            "boundary_margin": float(probe_env.config.sim_config["boundary_margin"]),
             "num_agents": args.num_agents,
             "max_steps": args.max_steps,
             "leftover_coef": probe_env.config.leftover_coef,
@@ -1051,7 +1053,7 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("RL/checkpoints/v2/residual_policy.pt"),
+        default=Path("RL/checkpoints/v3/residual_policy.pt"),
     )
     parser.add_argument(
         "--collision-penalty",

@@ -158,7 +158,7 @@ def train(args: argparse.Namespace) -> None:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "protocol_version": 2,
+                "protocol_version": 3,
                 **selection_meta,
                 "state_dict": policy.state_dict(),
                 "obs_dim": policy.obs_dim,
@@ -196,7 +196,7 @@ def main() -> None:
     parser.add_argument("--collision-penalty", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
-    parser.add_argument("--save", type=Path, default=Path("Baselines/checkpoints/v2/pure_rl_policy.pt"))
+    parser.add_argument("--save", type=Path, default=Path("Baselines/checkpoints/v3/pure_rl_policy.pt"))
     add_validation_args(parser)
     parser.add_argument("--train-obb-filter", action="store_true")
     train(parser.parse_args())

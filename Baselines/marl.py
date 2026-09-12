@@ -46,9 +46,9 @@ ALGORITHMS = ("ippo", "mappo", "happo", "hatrpo")
 SEQUENTIAL_ALGORITHMS = ("happo", "hatrpo")
 
 DEFAULT_CHECKPOINTS = {
-    "mappo": Path("Baselines/checkpoints/v2/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/v2/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/v2/hatrpo_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/v3/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/v3/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/v3/hatrpo_policy.pt"),
 }
 
 
@@ -179,12 +179,14 @@ class MARLPolicy(nn.Module):
 def save_marl_policy(policy: MARLPolicy, path: Path, extra: dict | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = {
-        "protocol_version": 2,
+        "protocol_version": 3,
                 "state_dict": policy.state_dict(),
         "obs_dim": policy.obs_dim,
         "num_agents": policy.num_agents,
         "hidden_dim": policy.hidden_dim,
         "algo": policy.algo,
+        "reward_mode": "team_mean" if policy.algo in SEQUENTIAL_ALGORITHMS else "individual",
+        "sequential_update_revision": 2,
         "max_accel": float(policy.action_scale[0].item()),
         "max_steering": float(policy.action_scale[1].item()),
     }
@@ -196,6 +198,9 @@ def load_marl_policy(checkpoint: Path, obs_dim: int) -> MARLPolicy:
     blob = torch.load(checkpoint, map_location="cpu")
     from RL.protocol import validate_checkpoint
     validate_checkpoint(blob, obs_dim, checkpoint)
+    if blob.get("algo") in SEQUENTIAL_ALGORITHMS and (
+            blob.get("reward_mode") != "team_mean" or blob.get("sequential_update_revision") != 2):
+        raise ValueError("HAPPO/HATRPO checkpoint predates cooperative-return/KL fixes; retrain")
     policy = MARLPolicy(
         obs_dim=int(blob.get("obs_dim", obs_dim)),
         num_agents=int(blob["num_agents"]),

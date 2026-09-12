@@ -166,7 +166,7 @@ def train(args: argparse.Namespace) -> None:
         args.save.parent.mkdir(parents=True, exist_ok=True)
         torch.save(
             {
-                "protocol_version": 2,
+                "protocol_version": 3,
                 **selection_meta,
                 "state_dict": policy.state_dict(),
                 "obs_dim": policy.obs_dim,
@@ -209,7 +209,7 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("Baselines/checkpoints/v2/direct_discrete_policy.pt"),
+        default=Path("Baselines/checkpoints/v3/direct_discrete_policy.pt"),
     )
     parser.add_argument("--target-kl", type=float, default=0.02)
     parser.add_argument("--no-anneal-lr", dest="anneal_lr", action="store_false")

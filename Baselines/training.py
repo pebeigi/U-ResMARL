@@ -136,6 +136,7 @@ class PolicySelection:
         return {"selected_update": self.selected_update, "validation": self.val_stats,
                 "test": test, "train_seed": self.args.seed,
                 "train_obb_filter": bool(getattr(self.args, "train_obb_filter", False)),
+                "boundary_safety_filter": True, "boundary_margin": 0.1,
                 "collision_penalty": self.args.collision_penalty,
                 "num_agents": self.args.num_agents, "max_steps": self.args.max_steps}
 

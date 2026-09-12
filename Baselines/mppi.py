@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import numpy as np
+from scipy.special import ndtr, ndtri
 
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
@@ -58,7 +59,10 @@ class MPPIController(BaseController):
         self.w_boundary = float(w_boundary)
         self.w_control = float(w_control)
         self.w_steering = float(w_steering)
-        self.rng = np.random.default_rng(seed)
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
+        if self.temperature <= 0 or np.any(self.noise_std <= 0):
+            raise ValueError("MPPI temperature and noise standard deviations must be positive")
         if name:
             self.name = name
         self._radius = 2.4
@@ -66,6 +70,7 @@ class MPPIController(BaseController):
         self._nominal: dict[int, np.ndarray] = {}
 
     def reset(self, scenario: "Scenario") -> None:
+        self.rng = np.random.default_rng(np.random.SeedSequence([self.seed, scenario.seed]))
         self._radius = 0.5 * float(np.hypot(scenario.vehicle_length, scenario.vehicle_width))
         self._dest_s = np.array([a.dest_s for a in scenario.agents], dtype=float)
         self._nominal = {a.agent_id: np.zeros((self.horizon, 2)) for a in scenario.agents}
@@ -127,10 +132,14 @@ class MPPIController(BaseController):
                 continue
 
             nominal = self._nominal.setdefault(agent.agent_id, np.zeros((self.horizon, 2)))
-            noise = self.rng.normal(0.0, 1.0, size=(self.samples, self.horizon, 2)) * self.noise_std
-            candidates = nominal[None, :, :] + noise
-            candidates[:, :, 0] = np.clip(candidates[:, :, 0], -max_accel, max_accel)
-            candidates[:, :, 1] = np.clip(candidates[:, :, 1], -MAX_STEERING, MAX_STEERING)
+            # Sample the bounded proposal itself; clipping Gaussian noise would
+            # introduce point masses and invalidate its density correction.
+            limits = np.array([max_accel, MAX_STEERING])
+            lower = ndtr((-limits - nominal) / self.noise_std)
+            upper = ndtr((limits - nominal) / self.noise_std)
+            quantiles = self.rng.uniform(lower, upper, size=(self.samples, self.horizon, 2))
+            candidates = nominal + self.noise_std * ndtri(np.clip(quantiles, 1e-12, 1 - 1e-12))
+            candidates = np.clip(candidates, -limits, limits)
 
             traj, speeds, _ = simulate_bicycle_batch(
                 agent.pos,
@@ -158,10 +167,13 @@ class MPPIController(BaseController):
             )
             cost += self.w_control * np.sum(candidates[:, :, 0] ** 2, axis=1)
             cost += self.w_steering * np.sum(candidates[:, :, 1] ** 2, axis=1)
+            # -temperature * log(p_zero / q_nominal). Truncation normalizers
+            # and terms depending only on nominal cancel between sample weights.
+            cost += self.temperature * np.sum(nominal * candidates / self.noise_std**2, axis=(1, 2))
 
             weights = np.exp(-(cost - cost.min()) / max(self.temperature, 1e-6))
             weights /= max(float(weights.sum()), 1e-12)
-            nominal = nominal + np.einsum("k,khc->hc", weights, noise)
+            nominal = np.einsum("k,khc->hc", weights, candidates)
             nominal[:, 0] = np.clip(nominal[:, 0], -max_accel, max_accel)
             nominal[:, 1] = np.clip(nominal[:, 1], -MAX_STEERING, MAX_STEERING)
 

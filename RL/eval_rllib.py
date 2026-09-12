@@ -107,7 +107,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=Path("RL/checkpoints/v2/rllib_ppo/checkpoint_final"),
+        default=Path("RL/checkpoints/v3/rllib_ppo/checkpoint_final"),
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-steps", type=int, default=240)

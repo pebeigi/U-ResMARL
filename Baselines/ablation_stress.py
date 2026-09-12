@@ -54,8 +54,8 @@ STRESS_SPAWN = {
 }
 
 _COLLPEN_CHECKPOINTS = {
-    "residual_collpen": Path("RL/checkpoints/v2/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/v2/residual_collpen_dense_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/v3/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"),
 }
 
 STATS_METRICS = (

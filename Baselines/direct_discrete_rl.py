@@ -41,7 +41,7 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the direct discrete RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/v2/direct_discrete_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/v3/direct_discrete_policy.pt")
 
 
 from RL.value_normalization import ValueNormalizer

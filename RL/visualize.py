@@ -375,11 +375,11 @@ def main() -> None:
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
     parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
-    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/v2/residual_policy.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/v3/residual_policy.pt"))
     parser.add_argument(
         "--rllib-checkpoint",
         type=Path,
-        default=Path("RL/checkpoints/v2/rllib_ppo/checkpoint_final"),
+        default=Path("RL/checkpoints/v3/rllib_ppo/checkpoint_final"),
         help="RLlib checkpoint directory (preferred if it exists)",
     )
     parser.add_argument("--no-gif", action="store_true", help="Skip GIF animation export")

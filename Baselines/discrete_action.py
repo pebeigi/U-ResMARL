@@ -77,14 +77,18 @@ def feasible_action_mask(
     """Boolean mask over the fixed (accel, steering) grid with OBB conflict rejection."""
     sim_config = scenario.sim_config
     n = num_grid_actions(sim_config)
-    if not sim_config.get("obb_safety_filter", True):
-        return np.ones(n, dtype=bool)
+    from RL.boundary import candidate_boundary_safe, BoundaryInfeasibleError
     mask = np.zeros(n, dtype=bool)
+    boundary_mask = np.zeros(n, dtype=bool)
     context = build_step_context(agent_idx, agent, agents, sim_config)
     for k in range(n):
         cand = grid_candidate(agent, k, scenario.dt, sim_config)
-        if not candidate_obb_conflict(cand, agent_idx, agents, sim_config, context=context):
+        boundary_mask[k] = candidate_boundary_safe(agent, cand, sim_config, scenario.corridor)
+        if boundary_mask[k] and (not sim_config.get("obb_safety_filter", True) or
+                not candidate_obb_conflict(cand, agent_idx, agents, sim_config, context=context)):
             mask[k] = True
     if not mask.any():
-        mask[:] = True
+        mask = boundary_mask
+    if not mask.any():
+        raise BoundaryInfeasibleError("No boundary-feasible discrete action; state was not advanced")
     return mask

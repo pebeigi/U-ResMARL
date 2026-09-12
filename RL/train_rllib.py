@@ -183,7 +183,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
     parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("RL/checkpoints/v2/rllib_ppo"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=Path("RL/checkpoints/v3/rllib_ppo"))
     parser.add_argument("--residual-mode", choices=("candidate_logits", "param_delta"), default="candidate_logits")
     parser.add_argument("--collision-penalty", type=float, default=8.0)
     parser.add_argument("--train-obb-filter", action="store_true")
