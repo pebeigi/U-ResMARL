@@ -9,9 +9,8 @@ import numpy as np
 
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import Controller
-from Baselines.dynamics import apply_control, hold_still, project_and_clearances, sanitize_control
+from Baselines.dynamics import project_and_clearances
 from Baselines.scenario import Scenario
-from RL.corridor import boxes_overlap
 from RL.transition import advance_agents
 from utility_model import TrafficAgent
 
@@ -71,107 +70,80 @@ def _agent_state(
     return pos, head, spd, lat, clr, sta
 
 
+class RolloutRecorder:
+    """One trace format for training validation and the standalone benchmark."""
+
+    def __init__(self, scenario: Scenario, agents: list[TrafficAgent], model: str):
+        import time
+        self.started = time.perf_counter()
+        self.scenario, self.model = scenario, model
+        self.states = [_agent_state(agents, scenario)]
+        self.actives = [np.array([not a.reached_destination for a in agents])]
+        self.controls = []
+        self.arrival_step = np.full(len(agents), -1, dtype=int)
+        self.collision_steps = self.collision_events = self.offroad_steps = 0
+        self.colliding_agents, self.offroad_agents, self.active_pairs = set(), set(), set()
+
+    def record(self, agents, controls, collision_pairs):
+        self.controls.append(np.asarray(controls, dtype=float))
+        self.states.append(_agent_state(agents, self.scenario))
+        active = np.array([not a.reached_destination for a in agents])
+        active_before = self.actives[-1]
+        self.arrival_step[active_before & ~active] = len(self.controls)
+        self.actives.append(active)
+        self.collision_events += len(collision_pairs - self.active_pairs)
+        self.collision_steps += len(collision_pairs)
+        self.colliding_agents.update(i for pair in collision_pairs for i in pair)
+        self.active_pairs = set(collision_pairs)
+        offroad = set(np.flatnonzero(active_before & (self.states[-1][4] < 0.0)))
+        self.offroad_steps += len(offroad)
+        self.offroad_agents.update(offroad)
+
+    def result(self, *, extra=None):
+        import time
+        scenario = self.scenario
+        n = scenario.num_agents
+        positions, headings, speeds, lateral, clearance, station = (
+            np.asarray(values) for values in zip(*self.states))
+        controls = np.asarray(self.controls) if self.controls else np.zeros((0, n, 2))
+        return RolloutResult(
+            model=self.model, seed=scenario.seed, run_id=scenario.run_id,
+            lane_kf=scenario.lane_kf, dt=scenario.dt,
+            vehicle_length=scenario.vehicle_length, vehicle_width=scenario.vehicle_width,
+            steps=len(self.controls), num_agents=n,
+            positions=positions, headings=headings, speeds=speeds,
+            accels=controls[:, :, 0], steerings=controls[:, :, 1],
+            active=np.asarray(self.actives), lateral=lateral, clearance=clearance,
+            station=station, collision_steps=self.collision_steps,
+            collision_events=self.collision_events, colliding_agents=self.colliding_agents,
+            offroad_steps=self.offroad_steps, offroad_agents=self.offroad_agents,
+            arrival_step=self.arrival_step,
+            dest_s=np.array([a.dest_s for a in scenario.agents]),
+            start_s=np.array([a.start_s for a in scenario.agents]),
+            wall_time=time.perf_counter() - self.started,
+            extra={"spawn_protocol_version": scenario.sim_config.get("spawn_protocol_version", 1),
+                   "collision_filter_revision": scenario.sim_config.get("collision_filter_revision", 1),
+                   **(extra or {})},
+        )
+
+
 def rollout(
     scenario: Scenario,
     controller: Controller,
     stop_when_all_arrived: bool = True,
 ) -> RolloutResult:
     """Simulate one scenario under one controller."""
-    import time
-
-    t0 = time.perf_counter()
     agents = scenario.spawn_agents()
     controller.reset(scenario)
-
+    recorder = RolloutRecorder(scenario, agents, getattr(controller, "name", controller.__class__.__name__))
     dest_s = np.array([a.dest_s for a in scenario.agents], dtype=float)
-    start_s = np.array([a.start_s for a in scenario.agents], dtype=float)
-    tol = float(scenario.sim_config.get("destination_threshold", 1.0))
-    length = scenario.vehicle_length
-    width = scenario.vehicle_width
-    n = len(agents)
-
-    positions, headings, speeds, laterals, clearances, stations = [], [], [], [], [], []
-    accels, steerings, actives = [], [], []
-    arrival_step = np.full(n, -1, dtype=int)
-
-    collision_steps = 0
-    collision_events = 0
-    colliding_agents: set[int] = set()
-    offroad_steps = 0
-    offroad_agents: set[int] = set()
-    active_pairs: set[tuple[int, int]] = set()
-
-    p, h, v, lat, clr, sta = _agent_state(agents, scenario)
-    positions.append(p)
-    headings.append(h)
-    speeds.append(v)
-    laterals.append(lat)
-    clearances.append(clr)
-    stations.append(sta)
-    actives.append(np.array([not a.reached_destination for a in agents]))
-
-    steps = 0
     for step in range(scenario.max_steps):
         controls = controller.compute_controls(agents, scenario, step)
-
         transition = advance_agents(agents, controls, scenario.corridor, scenario.sim_config, dest_s)
-        step_accel = np.array([c[0] for c in transition.controls])
-        step_steer = np.array([c[1] for c in transition.controls])
-        for i in transition.arrived:
-            arrival_step[i] = step + 1
-        current_pairs = transition.collision_pairs
-        hit_this_step = transition.colliding_agents
-        collision_events += len(current_pairs - active_pairs)
-        collision_steps += len(current_pairs)
-        colliding_agents.update(hit_this_step)
-        active_pairs = current_pairs
-
-        p, h, v, lat, clr, sta = _agent_state(agents, scenario)
-        for i in range(n):
-            if transition.active_before[i] and clr[i] < 0.0:
-                offroad_steps += 1
-                offroad_agents.add(i)
-
-        positions.append(p)
-        headings.append(h)
-        speeds.append(v)
-        laterals.append(lat)
-        clearances.append(clr)
-        stations.append(sta)
-        accels.append(step_accel)
-        steerings.append(step_steer)
-        actives.append(np.array([not a.reached_destination for a in agents]))
-        steps = step + 1
-
+        recorder.record(agents, transition.controls, transition.collision_pairs)
         if stop_when_all_arrived and all(a.reached_destination for a in agents):
             break
-
-    return RolloutResult(
-        model=getattr(controller, "name", controller.__class__.__name__),
-        seed=scenario.seed,
-        run_id=scenario.run_id,
-        lane_kf=scenario.lane_kf,
-        dt=scenario.dt,
-        vehicle_length=length,
-        vehicle_width=width,
-        steps=steps,
-        num_agents=n,
-        positions=np.asarray(positions),
-        headings=np.asarray(headings),
-        speeds=np.asarray(speeds),
-        accels=np.asarray(accels) if accels else np.zeros((0, n)),
-        steerings=np.asarray(steerings) if steerings else np.zeros((0, n)),
-        active=np.asarray(actives),
-        lateral=np.asarray(laterals),
-        clearance=np.asarray(clearances),
-        station=np.asarray(stations),
-        collision_steps=collision_steps,
-        collision_events=collision_events,
-        colliding_agents=colliding_agents,
-        offroad_steps=offroad_steps,
-        offroad_agents=offroad_agents,
-        arrival_step=arrival_step,
-        dest_s=dest_s,
-        start_s=start_s,
-        wall_time=time.perf_counter() - t0,
-    )
+    return recorder.result(extra={
+        "selection_status": getattr(getattr(controller, "policy", None), "selection_status", "not_applicable"),
+        "training_revision": getattr(getattr(controller, "policy", None), "training_revision", None),
+    })

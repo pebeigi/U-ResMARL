@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,7 @@ from Baselines.runner import RolloutResult, rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/v2")
+DEFAULT_OUTPUT = Path("Baselines/results/revision5")
 
 
 def preflight_models(models, args, scenario):
@@ -40,6 +41,7 @@ def preflight_models(models, args, scenario):
                 pure_rl_checkpoint=getattr(args, "pure_rl_checkpoint", None),
                 calibration=args.calibration, checkpoint_dir=args.checkpoint_dir,
                 checkpoint_override=checkpoint if train_seed >= 0 else None,
+                train_seed=train_seed,
             ))
             controller.reset(scenario)
 
@@ -67,23 +69,67 @@ def _attach_realism_metrics(frame: pd.DataFrame, realism: pd.DataFrame) -> pd.Da
 
 
 def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, list[RolloutResult]]]:
-    scenario_seeds = list(range(args.seed, args.seed + args.scenarios))
-    scenarios = [
-        build_scenario(
-            seed=s,
-            num_agents=args.num_agents,
-            max_steps=args.max_steps,
-            dt=args.dt,
-            run_id=args.run_id,
-            lane_kf=args.lane_kf,
-            obb_safety_filter=False if args.no_obb_safety_filter else None,
-        )
-        for s in scenario_seeds
-    ]
+    data_mode = getattr(args, "data_evaluation", False)
+    recorded = {}
+    if data_mode:
+        from Baselines.data_evaluation import build_recorded_scenes, file_sha256
+        from Baselines.realism import DEFAULT_DATA_CSV, paired_realism_metrics
+        from Baselines.data_evaluation import trajectory_metrics
+        from RL.calibration_io import DEFAULT_CALIBRATION_PATH
+
+        data_scenes, manifest = build_recorded_scenes(
+            getattr(args, "data_csv", None) or DEFAULT_DATA_CSV,
+            count=args.scenarios, seed=args.seed, run_id=args.run_id, lane_kf=args.lane_kf,
+            dt=args.dt, horizons=args.data_horizons, split=args.data_split,
+            obb_safety_filter=not args.no_obb_safety_filter)
+        recorded = {item.scenario.seed: item for item in data_scenes}
+        scenarios = [item.scenario for item in data_scenes]
+        calibration = args.calibration or DEFAULT_CALIBRATION_PATH
+        manifest["calibration"] = {"path": str(Path(calibration).resolve()),
+                                   "sha256": file_sha256(calibration)}
+        manifest["checkpoints"] = []
+        for model in args.models:
+            for train_seed, checkpoint in resolve_train_seeds(
+                    model, args.train_seeds, base=_base_checkpoint(model, args)):
+                if is_learned(model) and checkpoint is not None:
+                    manifest["checkpoints"].append({
+                        "model": model, "train_seed": train_seed, "path": str(checkpoint.resolve()),
+                        "sha256": file_sha256(checkpoint)})
+        manifest["metric_processing"] = {
+            "kinematics": "backward position differences at dt for both traces; "
+                          "heading held below 0.05 m/s; wrapped angular differences",
+            "coverage": "ADE/FDE require full observed horizon; realism uses common "
+                        "observed agent/time coverage, including model arrivals and contacts",
+            "realism": "per-scene W1 and natural-log JS; reference-defined shared bins with tail bins",
+            "interaction_geometry": "two covering discs per shared vehicle footprint",
+            "gap_cap_m": 60., "ttc_cap_s": 10.,
+            "realism_score": "mean normalized W1 across six features, lower is better; diagnostic",
+            "normalization_std_floors": dict(speed=.1, accel=.1, lateral=.1, yaw_rate=.01, gap=1., ttc=1.),
+        }
+        args._data_scenes, args._data_manifest = data_scenes, manifest
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        (args.output_dir / "data_manifest.json").write_text(
+            json.dumps(manifest, indent=2, allow_nan=False), encoding="utf-8")
+        print(f"[data] {manifest['holdout_status']}: {manifest['holdout_note']}", flush=True)
+    else:
+        scenarios = [
+            build_scenario(
+                seed=s,
+                num_agents=args.num_agents,
+                max_steps=args.max_steps,
+                dt=args.dt,
+                run_id=args.run_id,
+                lane_kf=args.lane_kf,
+                obb_safety_filter=False if args.no_obb_safety_filter else None,
+            )
+            for s in range(args.seed, args.seed + args.scenarios)
+        ]
     print(
         f"Corridor run_id={args.run_id}, lane_kf={args.lane_kf}, "
         f"length={scenarios[0].corridor.length:.1f} m | "
-        f"{len(scenarios)} scenarios x {args.num_agents} agents x {args.max_steps} steps"
+        f"{len(scenarios)} scenarios | agents={min(s.num_agents for s in scenarios)}"
+        f"..{max(s.num_agents for s in scenarios)} | {scenarios[0].max_steps} steps",
+        flush=True,
     )
 
     preflight_models(args.models, args, scenarios[0])
@@ -101,10 +147,28 @@ def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, lis
                 calibration=args.calibration,
                 checkpoint_dir=args.checkpoint_dir,
                 checkpoint_override=checkpoint if train_seed >= 0 else None,
+                train_seed=train_seed,
             )
             controller = build_controller(model, **kwargs)
             for scenario in scenarios:
-                model_results.append(rollout(scenario, controller))
+                result = rollout(scenario, controller, stop_when_all_arrived=not data_mode)
+                if data_mode:
+                    reference = recorded[scenario.seed]
+                    scores = trajectory_metrics(result, reference, args.data_horizons)
+                    if not args.no_realism:
+                        scores.update(paired_realism_metrics(result, reference))
+                    scores.update(
+                        data_split=args.data_split,
+                        data_time_block=reference.metadata["time_block"],
+                        data_scene_start_s=reference.metadata["start_time_s"],
+                        initial_overlap_pairs=reference.metadata["initial_overlap_pairs"],
+                        initial_excluded_agents=len(reference.metadata["excluded_initial_agents"]),
+                        holdout_status=args._data_manifest["holdout_status"],
+                    )
+                    result.extra["data_metrics"] = scores
+                    print(f"    {model}: recorded scene {scenario.seed} "
+                          f"({scenario.num_agents} agents) evaluated", flush=True)
+                model_results.append(result)
                 model_train_seeds.append(train_seed)
         results[model] = model_results
         train_seeds[model] = model_train_seeds
@@ -121,6 +185,10 @@ def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, lis
     flat = [r for model_results in results.values() for r in model_results]
     frame = metrics_frame(flat)
     frame["train_seed"] = [s for model in results for s in train_seeds[model]]
+    if data_mode:
+        data_frame = pd.DataFrame([dict(model=r.model, seed=r.seed, **r.extra["data_metrics"])
+                                   for r in flat])
+        frame = _attach_realism_metrics(frame, data_frame)
     return frame, results
 
 
@@ -145,6 +213,12 @@ def write_statistics(
     """Per-model intervals and paired comparisons against the reference model."""
     from Baselines.stats import comparison_frame, summary_frame, to_latex_ci
 
+    if "data_time_block" in frame:
+        # Nearby windows share traffic. Bootstrap block means, not frames/cars
+        # or overlapping traffic windows as independent samples.
+        frame = frame.groupby(["model", "train_seed", "data_time_block"], as_index=False)[metrics].mean()
+        frame = frame.rename(columns={"data_time_block": "seed"})
+        print("[stats] recorded-scene intervals resample time blocks (and training seeds when available)")
     models = list(dict.fromkeys(frame["model"]))
     written: list[Path] = []
 
@@ -220,13 +294,23 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--no-realism", action="store_true", help="skip data-distribution metrics")
+    parser.add_argument("--data-evaluation", action="store_true",
+                        help="Evaluate recorded scenes with matched trajectory/realism metrics; "
+                             "--num-agents and --max-steps apply only to random scenarios")
+    parser.add_argument("--data-csv", type=Path, default=None)
+    parser.add_argument("--data-split", choices=["train", "validation", "test"], default="test")
+    parser.add_argument("--data-horizons", nargs="+", type=float, default=[1., 3., 5.])
     parser.add_argument("--no-figures", action="store_true")
     args = parser.parse_args()
+    if args.scenarios < 1 or args.dt <= 0:
+        parser.error("--scenarios and --dt must be positive")
+    if args.data_csv is not None and not args.data_evaluation:
+        parser.error("--data-csv requires --data-evaluation")
 
     frame, results = run_benchmark(args)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if not args.no_realism:
+    if not args.no_realism and not args.data_evaluation:
         try:
             from Baselines.realism import realism_frame
 
@@ -241,15 +325,16 @@ def main() -> None:
     latex_path = args.output_dir / "benchmark_table.tex"
     frame.to_csv(raw_path, index=False)
 
-    summary_columns = None
-    if "realism_score" in frame.columns:
-        from Baselines.metrics import AGGREGATE_COLUMNS
-
-        summary_columns = [c for c in AGGREGATE_COLUMNS if c in frame.columns] + ["realism_score"]
+    from Baselines.metrics import AGGREGATE_COLUMNS
+    data_columns = [c for c in frame if c.startswith((
+        "ade_", "fde_", "speed_rmse_", "heading_mae_", "trajectory_", "heading_samples_",
+        "w1_", "js_", "realism_samples_")) or c == "realism_score"]
+    summary_columns = [c for c in AGGREGATE_COLUMNS if c in frame] + data_columns
     summary = aggregate(frame, summary_columns)
     summary.to_csv(summary_path, index=False)
 
     latex_columns = [
+        "closed_loop_score",
         "collision_events",
         "offroad_rate",
         "min_ttc_s",
@@ -259,9 +344,13 @@ def main() -> None:
     ]
     if "realism_score" in frame.columns:
         latex_columns.append("realism_score")
+    if args.data_evaluation:
+        latex_columns += [c for c in data_columns if c.startswith(("ade_", "fde_"))]
     latex_path.write_text(to_latex(frame, latex_columns), encoding="utf-8")
 
-    stats_paths = write_statistics(frame, args, latex_columns)
+    statistical_metrics = list(dict.fromkeys(latex_columns + [
+        c for c in data_columns if c.startswith(("speed_rmse_", "heading_mae_", "w1_", "js_"))]))
+    stats_paths = write_statistics(frame, args, statistical_metrics)
 
     if not args.no_figures:
         from Baselines.plots import (
@@ -272,7 +361,7 @@ def main() -> None:
         )
 
         plot_metric_bars(frame, args.output_dir / "benchmark_metrics.png")
-        first_scenario = build_scenario(
+        first_scenario = args._data_scenes[0].scenario if args.data_evaluation else build_scenario(
             seed=args.seed,
             num_agents=args.num_agents,
             max_steps=args.max_steps,
@@ -291,17 +380,22 @@ def main() -> None:
             first_scenario,
             args.output_dir / "benchmark_trajectories_frenet.png",
         )
-        try:
-            flat = [r for model_results in results.values() for r in model_results]
-            plot_distribution_comparison(
-                flat,
-                args.output_dir / "benchmark_distributions.png",
-                args.run_id,
-                args.lane_kf,
-                args.dt,
-            )
-        except Exception as exc:
-            print(f"[distributions] skipped: {exc}")
+        if args.data_evaluation:
+            from Baselines.plots import plot_recorded_comparison
+            plot_recorded_comparison(results, args._data_scenes, args.output_dir,
+                                     realism=not args.no_realism)
+        elif not args.no_realism:
+            try:
+                flat = [r for model_results in results.values() for r in model_results]
+                plot_distribution_comparison(
+                    flat,
+                    args.output_dir / "benchmark_distributions.png",
+                    args.run_id,
+                    args.lane_kf,
+                    args.dt,
+                )
+            except Exception as exc:
+                print(f"[distributions] skipped: {exc}")
 
     with pd.option_context("display.width", 200, "display.max_columns", 50):
         headline = [
@@ -319,6 +413,11 @@ def main() -> None:
         ]
         print("\n" + frame.groupby("model", sort=False)[headline].mean().to_string())
     print(f"\nWrote {raw_path}, {summary_path}, {latex_path}")
+    if args.data_evaluation:
+        accuracy = [c for c in frame if c.startswith(("ade_", "fde_", "speed_rmse_",
+                                                      "heading_mae_", "trajectory_coverage_"))]
+        print("\nRecorded trajectory metrics:\n" + frame.groupby("model")[accuracy].mean().to_string())
+        print(f"Wrote {args.output_dir / 'data_manifest.json'}")
     for path in stats_paths:
         print(f"Wrote {path}")
 

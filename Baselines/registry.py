@@ -26,16 +26,39 @@ def _utility_pt_logit(**kwargs: Any) -> Controller:
 def _residual_marl(**kwargs: Any) -> Controller:
     from Baselines.residual_marl import ResidualMARLController
 
+    kwargs.setdefault("accept_if_better", True)
     return ResidualMARLController(**kwargs)
 
 
-# Only the candidate residual uses the main checkpoint override.
-RESIDUAL_INFERENCE_VARIANTS = frozenset({"residual_marl"})
+def _residual_no_gate(**kwargs: Any) -> Controller:
+    """Trained candidate residual without the PDM-Closed accept-if-better gate."""
+    from Baselines.residual_marl import ResidualMARLController
+
+    kwargs.setdefault("accept_if_better", False)
+    kwargs.setdefault("name", "residual_no_gate")
+    return ResidualMARLController(**kwargs)
+
+
+def _residual_random_gate(**kwargs: Any) -> Controller:
+    """Untrained residual with the same architecture and accept-if-better gate."""
+    from Baselines.residual_marl import ResidualMARLController
+
+    kwargs.setdefault("random_init", True)
+    kwargs.setdefault("accept_if_better", True)
+    kwargs.setdefault("checkpoint", None)
+    kwargs.setdefault("name", "residual_random_gate")
+    return ResidualMARLController(**kwargs)
+
+
+# Candidate residuals that reuse the main residual checkpoint override.
+RESIDUAL_INFERENCE_VARIANTS = frozenset({"residual_marl", "residual_no_gate"})
+# Architecture-matched random residual; no weights file, one draw per train seed.
+RANDOM_INIT_RESIDUAL_MODELS = frozenset({"residual_random_gate"})
 
 
 def _residual_param(**kwargs: Any) -> Controller:
     from Baselines.residual_marl import ResidualMARLController
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_param_policy.pt"))
     kwargs.setdefault("name", "residual_param")
     return ResidualMARLController(**kwargs)
 
@@ -58,7 +81,7 @@ def _residual_sigma_frozen(**kwargs: Any) -> Controller:
     """Legacy name: freeze collision-kernel shape residuals (sigma only at base)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_sigma_frozen")
     return ResidualMARLController(**kwargs)
@@ -71,7 +94,7 @@ def _residual_weights_only(**kwargs: Any) -> Controller:
     """
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", ("sigma_long", "sigma_lat"))
     kwargs.setdefault("name", "residual_weights_only")
     return ResidualMARLController(**kwargs)
@@ -81,7 +104,7 @@ def _residual_sigma_only(**kwargs: Any) -> Controller:
     """Freeze amplitude logits and non-sigma shape; only sigma_* may adapt."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_param_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_param_policy.pt"))
     kwargs.setdefault("freeze_keys", AMPLITUDE_LOGIT_KEYS + _SHAPE_EXCEPT_SIGMA)
     kwargs.setdefault("name", "residual_sigma_only")
     return ResidualMARLController(**kwargs)
@@ -91,7 +114,7 @@ def _residual_nominal(**kwargs: Any) -> Controller:
     """Residual on the uncalibrated nominal prior (tests calibration importance)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_nominal_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_nominal_policy.pt"))
     kwargs.setdefault("prefer", "nominal")
     kwargs.setdefault("name", "residual_nominal")
     return ResidualMARLController(**kwargs)
@@ -101,7 +124,7 @@ def _residual_collpen(**kwargs: Any) -> Controller:
     """Residual trained with an OBB collision penalty (sparse training by default)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_collpen_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_collpen_policy.pt"))
     kwargs.setdefault("name", "residual_collpen")
     return ResidualMARLController(**kwargs)
 
@@ -110,7 +133,7 @@ def _residual_collpen_dense(**kwargs: Any) -> Controller:
     """Collision-penalty residual trained under dense spawn (stress distribution)."""
     from Baselines.residual_marl import ResidualMARLController
 
-    kwargs.setdefault("checkpoint", Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("RL/checkpoints/revision5/residual_collpen_dense_policy.pt"))
     kwargs.setdefault("name", "residual_collpen_dense")
     return ResidualMARLController(**kwargs)
 
@@ -161,7 +184,7 @@ def _pure_rl_safe(**kwargs: Any) -> Controller:
     """Pure RL trained with an explicit collision penalty added to the shared reward."""
     from Baselines.pure_rl import PureRLController
 
-    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/v3/pure_rl_safe_policy.pt"))
+    kwargs.setdefault("checkpoint", Path("Baselines/checkpoints/revision5/pure_rl_safe_policy.pt"))
     kwargs.setdefault("name", "pure_rl_safe")
     return PureRLController(**kwargs)
 
@@ -182,6 +205,8 @@ REGISTRY: dict[str, Callable[..., Controller]] = {
     "utility_pt_logit": _utility_pt_logit,
     "utility_nominal": _utility_nominal,
     "residual_marl": _residual_marl,
+    "residual_no_gate": _residual_no_gate,
+    "residual_random_gate": _residual_random_gate,
     "residual_param": _residual_param,
     "residual_sigma_frozen": _residual_sigma_frozen,
     "residual_weights_only": _residual_weights_only,
@@ -223,6 +248,8 @@ LABELS = {
     "utility_nominal": "Utility prior (nominal)",
     "utility_pt_logit": "Utility prior (logit choice)",
     "residual_marl": "Residual MARL (ours)",
+    "residual_no_gate": "Residual (no gate)",
+    "residual_random_gate": "Random residual + gate",
     "residual_param": "Parameter residual",
     "residual_sigma_frozen": "Residual (σ frozen, legacy)",
     "residual_weights_only": "Residual (weights only)",
@@ -247,29 +274,32 @@ LABELS = {
 # Models whose behavior depends on a training seed, with the checkpoint that a
 # single-seed run writes. Seeded runs append "_seed<k>" to the stem.
 LEARNED_CHECKPOINTS: dict[str, Path] = {
-    "residual_marl": Path("RL/checkpoints/v3/residual_policy.pt"),
-    "residual_sigma_frozen": Path("RL/checkpoints/v3/residual_param_policy.pt"),
-    "residual_weights_only": Path("RL/checkpoints/v3/residual_param_policy.pt"),
-    "residual_sigma_only": Path("RL/checkpoints/v3/residual_param_policy.pt"),
-    "residual_nominal": Path("RL/checkpoints/v3/residual_nominal_policy.pt"),
-    "residual_param": Path("RL/checkpoints/v3/residual_param_policy.pt"),
-    "residual_collpen": Path("RL/checkpoints/v3/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"),
-    "pure_rl": Path("Baselines/checkpoints/v3/pure_rl_policy.pt"),
-    "direct_discrete_rl": Path("Baselines/checkpoints/v3/direct_discrete_policy.pt"),
-    "pure_rl_safe": Path("Baselines/checkpoints/v3/pure_rl_safe_policy.pt"),
-    "mappo": Path("Baselines/checkpoints/v3/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/v3/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/v3/hatrpo_policy.pt"),
+    "residual_marl": Path("RL/checkpoints/revision5/residual_policy.pt"),
+    "residual_no_gate": Path("RL/checkpoints/revision5/residual_policy.pt"),
+    "residual_sigma_frozen": Path("RL/checkpoints/revision5/residual_param_policy.pt"),
+    "residual_weights_only": Path("RL/checkpoints/revision5/residual_param_policy.pt"),
+    "residual_sigma_only": Path("RL/checkpoints/revision5/residual_param_policy.pt"),
+    "residual_nominal": Path("RL/checkpoints/revision5/residual_nominal_policy.pt"),
+    "residual_param": Path("RL/checkpoints/revision5/residual_param_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/revision5/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/revision5/residual_collpen_dense_policy.pt"),
+    "pure_rl": Path("Baselines/checkpoints/revision5/pure_rl_policy.pt"),
+    "direct_discrete_rl": Path("Baselines/checkpoints/revision5/direct_discrete_policy.pt"),
+    "pure_rl_safe": Path("Baselines/checkpoints/revision5/pure_rl_safe_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/revision5/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/revision5/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/revision5/hatrpo_policy.pt"),
 }
 
 
 def is_learned(name: str) -> bool:
-    return name in LEARNED_CHECKPOINTS
+    return name in LEARNED_CHECKPOINTS or name in RANDOM_INIT_RESIDUAL_MODELS
 
 
 def seed_checkpoint(name: str, train_seed: int, base: Path | None = None) -> Path | None:
     """Path a training run with ``train_seed`` writes for this model."""
+    if name in RANDOM_INIT_RESIDUAL_MODELS:
+        return None
     root = base if base is not None else LEARNED_CHECKPOINTS.get(name)
     if root is None:
         return None
@@ -284,6 +314,8 @@ def resolve_train_seeds(
     """Require every requested seed; never substitute or silently drop runs."""
     if not train_seeds or not is_learned(name):
         return [(-1, base)]
+    if name in RANDOM_INIT_RESIDUAL_MODELS:
+        return [(int(seed), None) for seed in dict.fromkeys(train_seeds)]
     pairs, missing = [], []
     for seed in dict.fromkeys(train_seeds):
         path = seed_checkpoint(name, seed, base)
@@ -309,15 +341,21 @@ def controller_kwargs(
     calibration: Path | None = None,
     checkpoint_dir: Path | None = None,
     checkpoint_override: Path | None = None,
+    train_seed: int | None = None,
 ) -> dict[str, Any]:
     """CLI-level wiring of checkpoints and calibration files."""
+    if name in RANDOM_INIT_RESIDUAL_MODELS:
+        kwargs: dict[str, Any] = {"calibration": calibration, "random_init": True}
+        if train_seed is not None and train_seed >= 0:
+            kwargs["random_seed"] = int(train_seed)
+        return kwargs
     if checkpoint_override is not None and is_learned(name):
-        kwargs: dict[str, Any] = {"checkpoint": checkpoint_override}
+        kwargs = {"checkpoint": checkpoint_override}
         if name.startswith("residual"):
             kwargs["calibration"] = calibration
         return kwargs
     if name in RESIDUAL_INFERENCE_VARIANTS:
-        kwargs: dict[str, Any] = {"calibration": calibration}
+        kwargs = {"calibration": calibration}
         if residual_checkpoint is not None:
             kwargs["checkpoint"] = residual_checkpoint
         return kwargs

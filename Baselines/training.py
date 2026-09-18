@@ -25,14 +25,18 @@ class PPOMemory:
     traj_ids: list = field(default_factory=list)
 
 
-def collect_episode(scenario, policy, memory, collision_penalty=0.0, *, discrete=False):
+def collect_episode(scenario, policy, memory, collision_penalty=0.0, *, discrete=False,
+                    collision_event_penalty=0.0):
     agents = scenario.spawn_agents()
     dest_s = [a.dest_s for a in scenario.agents]
     trajectory_base = max(memory.traj_ids, default=-1) + 1
     total_reward = 0.0
     collisions = steps = 0
+    previous_pairs: set[tuple[int, int]] = set()
+    collided: set[int] = set()
     for step in range(scenario.max_steps):
-        active = [i for i, agent in enumerate(agents) if not agent.reached_destination]
+        active = [i for i, agent in enumerate(agents)
+                  if not agent.reached_destination and i not in collided]
         if not active:
             break
         controls = [(0.0, 0.0)] * len(agents)
@@ -54,14 +58,18 @@ def collect_episode(scenario, policy, memory, collision_penalty=0.0, *, discrete
 
         result = advance_agents(
             agents, controls, scenario.corridor, scenario.sim_config, dest_s,
-            leftover_coef=scenario.sim_config.get("leftover_coef", 0.05),
-            arrival_bonus=scenario.sim_config.get("arrival_bonus", 5.0),
+            leftover_coef=scenario.sim_config.get("leftover_coef", 0.08),
+            arrival_bonus=scenario.sim_config.get("arrival_bonus", 8.0),
             collision_penalty=collision_penalty,
+            collision_event_penalty=collision_event_penalty,
+            previous_collision_pairs=previous_pairs,
         )
+        previous_pairs = set(result.collision_pairs)
+        collided |= set(result.colliding_agents)
         collisions += len(result.collision_pairs)
         steps = step + 1
         for i in active:
-            terminal = bool(agents[i].reached_destination)
+            terminal = bool(agents[i].reached_destination) or i in collided
             timeout = steps == scenario.max_steps and not terminal
             memory.rewards.append(result.rewards[i])
             memory.dones.append(float(terminal))
@@ -128,14 +136,23 @@ class PolicySelection:
         print(f"Validation update {update}: {stats}")
 
     def finish(self):
+        from RL.traffic_env import SPAWN_PROTOCOL_VERSION
+        from RL.transition import DRIVING_REWARD_REVISION
         if self.best_state is not None:
             self.policy.load_state_dict(self.best_state)
-        seeds = [self.args.seed + 700_000 + i for i in range(max(1, getattr(self.args, "test_episodes", 16)))]
-        test = self.evaluate(seeds)
-        print(f"Held-out TEST: {test}")
+        n_test = int(getattr(self.args, "test_episodes", 16))
+        if getattr(self.args, "skip_test", False) or n_test <= 0:
+            test = {"skipped": True}
+            print("Held-out TEST: skipped")
+        else:
+            seeds = [self.args.seed + 700_000 + i for i in range(n_test)]
+            test = self.evaluate(seeds)
+            print(f"Held-out TEST: {test}")
         return {"selected_update": self.selected_update, "validation": self.val_stats,
+                "spawn_protocol_version": SPAWN_PROTOCOL_VERSION,
+                "collision_filter_revision": 2, "driving_reward_revision": DRIVING_REWARD_REVISION,
                 "test": test, "train_seed": self.args.seed,
-                "train_obb_filter": bool(getattr(self.args, "train_obb_filter", False)),
+                "train_obb_filter": bool(getattr(self.args, "train_obb_filter", True)),
                 "boundary_safety_filter": True, "boundary_margin": 0.1,
                 "collision_penalty": self.args.collision_penalty,
                 "num_agents": self.args.num_agents, "max_steps": self.args.max_steps}
@@ -145,3 +162,5 @@ def add_validation_args(parser):
     parser.add_argument("--val-every", type=int, default=10)
     parser.add_argument("--val-episodes", type=int, default=8)
     parser.add_argument("--test-episodes", type=int, default=16)
+    parser.add_argument("--skip-test", action="store_true",
+                        help="Skip held-out test evaluation after training")

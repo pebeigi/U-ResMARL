@@ -96,16 +96,20 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
     active_steps = int(active[:steps].sum()) if steps > 0 else 0
     active_steps = max(active_steps, 1)
 
-    speeds = result.speeds[1 : steps + 1]
-    mask = active[1 : steps + 1]
+    # Include the arrival transition. Stored speed is zeroed at arrival, so use
+    # the displacement speed for that transition as well as ordinary driving.
+    speeds = np.linalg.norm(velocities[1 : steps + 1], axis=-1)
+    mask = active[:steps]
     speed_vals = speeds[mask] if mask.any() else np.array([0.0])
 
     accels = result.accels
     accel_vals = accels[mask[: accels.shape[0]]] if accels.size else np.array([0.0])
     if accels.shape[0] > 1:
         jerk = np.diff(accels, axis=0) / dt
-        jerk_vals = jerk[(active[:-2] & active[1:-1] & active[2:])[:jerk.shape[0]]] if jerk.size else np.array([0.0])
+        jerk_vals = jerk[(active[:-2] & active[1:-1])[:jerk.shape[0]]] if jerk.size else np.array([0.0])
     else:
+        jerk_vals = np.array([0.0])
+    if not jerk_vals.size:
         jerk_vals = np.array([0.0])
     steer_vals = result.steerings[mask[: result.steerings.shape[0]]] if result.steerings.size else np.array([0.0])
 
@@ -128,9 +132,15 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
     progress = result.station[min(steps, result.station.shape[0] - 1)] - result.start_s
     goal_progress = np.clip(progress / np.maximum(result.dest_s - result.start_s, 1e-6), 0.0, 1.0)
 
-    return {
+    from RL.closed_loop_score import closed_loop_score as pdms
+
+    metrics = {
         "model": result.model,
         "seed": result.seed,
+        "spawn_protocol_version": result.extra.get("spawn_protocol_version", 1),
+        "collision_filter_revision": result.extra.get("collision_filter_revision", 1),
+        "selection_status": result.extra.get("selection_status", "not_applicable"),
+        "training_revision": result.extra.get("training_revision"),
         "num_agents": n,
         "steps": steps,
         "episode_time_s": steps * dt,
@@ -149,6 +159,9 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
         "arrival_rate": float(arrived.mean()),
         "goal_progress": float(np.mean(goal_progress)),
         "mean_travel_time_s": float(np.mean(travel_times)) if travel_times.size else float("nan"),
+        # Unfinished agents contribute the full observed horizon. The conditional
+        # arrival-only mean above can appear better merely by finishing fewer cars.
+        "mean_capped_travel_time_s": float(np.mean(np.where(arrived, result.arrival_step, steps)) * dt),
         "mean_speed_mps": float(np.mean(speed_vals)),
         "speed_std_mps": float(np.std(speed_vals)),
         # Comfort / plausibility
@@ -161,6 +174,8 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
         "wall_time_s": result.wall_time,
         "wall_time_per_agent_step_ms": 1000.0 * result.wall_time / max(steps * n, 1),
     }
+    metrics["closed_loop_score"] = pdms(metrics)
+    return metrics
 
 
 def metrics_frame(results: list[RolloutResult]) -> pd.DataFrame:
@@ -168,6 +183,7 @@ def metrics_frame(results: list[RolloutResult]) -> pd.DataFrame:
 
 
 AGGREGATE_COLUMNS = [
+    "closed_loop_score",
     "collision_events",
     "collision_rate_per_agent",
     "collision_free",
@@ -178,6 +194,7 @@ AGGREGATE_COLUMNS = [
     "arrival_rate",
     "goal_progress",
     "mean_travel_time_s",
+    "mean_capped_travel_time_s",
     "mean_speed_mps",
     "mean_abs_accel",
     "rms_jerk",
@@ -204,6 +221,7 @@ def aggregate(frame: pd.DataFrame, columns: list[str] | None = None) -> pd.DataF
 def to_latex(frame: pd.DataFrame, columns: list[str] | None = None, precision: int = 3) -> str:
     """Compact mean +/- std LaTeX table for the paper."""
     cols = columns or [
+        "closed_loop_score",
         "collision_events",
         "offroad_rate",
         "min_ttc_s",

@@ -35,7 +35,7 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the pure-RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/v3/pure_rl_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/revision5/pure_rl_policy.pt")
 ACTION_DIM = 2
 
 

@@ -18,9 +18,9 @@ import Baselines._paths  # noqa: F401
 from Baselines._paths import REPO_ROOT
 
 SEEDS = [0, 1, 2]
-LOG_DIR = Path("RL/logs/v3/paper_rerun")
+LOG_DIR = Path("RL/logs/revision5/paper_rerun")
 PIPELINE_LOG = LOG_DIR / "A_pipeline.log"
-STATS_OUT = Path("Baselines/results/v3/paper_rerun/A6_stats_summary.md")
+STATS_OUT = Path("Baselines/results/revision5/paper_rerun/A6_stats_summary.md")
 
 SPARSE_MODELS = [
     "orca",
@@ -58,15 +58,15 @@ def write_stats_summary() -> None:
     import pandas as pd
 
     paths = {
-        "sparse_benchmark": Path("Baselines/results/v3/benchmark_summary.csv"),
-        "sparse_paired": Path("Baselines/results/v3/benchmark_comparisons.csv"),
-        "ablation": Path("Baselines/results/v3/paper_ablation/ablation/ablation_summary.csv"),
-        "ablation_paired": Path("Baselines/results/v3/paper_ablation/ablation/ablation_paired.csv"),
+        "sparse_benchmark": Path("Baselines/results/revision5/benchmark_summary.csv"),
+        "sparse_paired": Path("Baselines/results/revision5/benchmark_comparisons.csv"),
+        "ablation": Path("Baselines/results/revision5/paper_ablation/ablation/ablation_summary.csv"),
+        "ablation_paired": Path("Baselines/results/revision5/paper_ablation/ablation/ablation_paired.csv"),
         "ablation_no_lookahead": Path(
-            "Baselines/results/v3/paper_ablation/ablation_no_lookahead/ablation_no_lookahead_summary.csv"
+            "Baselines/results/revision5/paper_ablation/ablation_no_lookahead/ablation_no_lookahead_summary.csv"
         ),
-        "stress": Path("Baselines/results/v3/paper_ablation/stress/stress_summary.csv"),
-        "stress_paired": Path("Baselines/results/v3/paper_ablation/stress/stress_paired.csv"),
+        "stress": Path("Baselines/results/revision5/paper_ablation/stress/stress_summary.csv"),
+        "stress_paired": Path("Baselines/results/revision5/paper_ablation/stress/stress_paired.csv"),
     }
 
     lines = [
@@ -137,6 +137,7 @@ def main() -> None:
                 str(args.jobs),
                 "--log-dir",
                 str(LOG_DIR),
+                "--overwrite",
             ],
             "A2+A5 multi-seed train",
         )
@@ -171,7 +172,7 @@ def main() -> None:
                 "--train-seeds",
                 *seed_args,
                 "--output-dir",
-                "Baselines/results/v2",
+                "Baselines/results/revision5",
             ],
             "A4 sparse benchmark",
         )

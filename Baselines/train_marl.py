@@ -68,6 +68,7 @@ def collect_episode(
     scenario: Scenario,
     policy: MARLPolicy,
     collision_penalty: float = 0.0,
+    collision_event_penalty: float = 0.0,
 ) -> Episode:
     agents = scenario.spawn_agents()
     dest_s = np.array([a.dest_s for a in scenario.agents], dtype=float)
@@ -82,9 +83,11 @@ def collect_episode(
     logp_buf, value_buf, reward_buf, mask_buf = [], [], [], []
     collisions = 0
     steps = 0
+    previous_pairs: set[tuple[int, int]] = set()
+    collided: set[int] = set()
 
     for step in range(scenario.max_steps):
-        if all(a.reached_destination for a in agents):
+        if all(a.reached_destination or i in collided for i, a in enumerate(agents)):
             break
 
         features = agent_features(agents, scenario)
@@ -98,6 +101,8 @@ def collect_episode(
         controls: dict[int, tuple[float, float]] = {}
 
         for i, agent in enumerate(agents):
+            if i in collided and policy.algo not in SEQUENTIAL_ALGORITHMS:
+                continue
             if agent.reached_destination and policy.algo not in SEQUENTIAL_ALGORITHMS:
                 continue
             obs = observation(agents, i, scenario)
@@ -112,15 +117,21 @@ def collect_episode(
             step_action[i] = action
             step_logp[i] = log_prob
             step_value[i] = value
-            step_mask[i] = float(not agent.reached_destination)
-            if not agent.reached_destination:
+            step_mask[i] = float(not agent.reached_destination and i not in collided)
+            if not agent.reached_destination and i not in collided:
                 controls[i] = policy.to_control(action)
 
         transition = advance_agents(
             agents, [controls.get(i, (0.0, 0.0)) for i in range(n)],
             scenario.corridor, scenario.sim_config, dest_s,
+            leftover_coef=scenario.sim_config.get("leftover_coef", 0.08),
+            arrival_bonus=scenario.sim_config.get("arrival_bonus", 8.0),
             collision_penalty=collision_penalty,
+            collision_event_penalty=collision_event_penalty,
+            previous_collision_pairs=previous_pairs,
         )
+        previous_pairs = set(transition.collision_pairs)
+        collided |= set(transition.colliding_agents)
         collisions += len(transition.collision_pairs)
         step_reward[:] = transition.rewards
         if policy.algo in SEQUENTIAL_ALGORITHMS:
@@ -139,14 +150,21 @@ def collect_episode(
     truncated = np.zeros(n, dtype=bool)
     if steps >= scenario.max_steps:
         features = agent_features(agents, scenario)
+        all_arrived = all(a.reached_destination for a in agents)
         for i, agent in enumerate(agents):
-            if not agent.reached_destination or (policy.algo in SEQUENTIAL_ALGORITHMS
-                                                 and not all(a.reached_destination for a in agents)):
-                truncated[i] = True
-                obs = observation(agents, i, scenario)
-                state = centralised_state(features, obs, policy.num_agents) if policy.centralised else obs
-                with torch.no_grad():
-                    bootstrap[i] = float(policy.value(torch.as_tensor(state, dtype=torch.float32)))
+            if policy.algo in SEQUENTIAL_ALGORITHMS:
+                # Team return continues until every agent finishes.
+                need_boot = not all_arrived
+            else:
+                # Individual returns: only still-active agents are truncated.
+                need_boot = (not agent.reached_destination) and (i not in collided)
+            if not need_boot:
+                continue
+            truncated[i] = True
+            obs = observation(agents, i, scenario)
+            state = centralised_state(features, obs, policy.num_agents) if policy.centralised else obs
+            with torch.no_grad():
+                bootstrap[i] = float(policy.value(torch.as_tensor(state, dtype=torch.float32)))
     arrived = sum(a.reached_destination for a in agents)
     return Episode(
         obs=np.asarray(obs_buf),
@@ -184,10 +202,14 @@ def episode_gae(episode: Episode, gamma: float, gae_lambda: float) -> tuple[np.n
         timeouts = np.zeros_like(dones)
         boot = np.zeros_like(dones)
         if episode.truncated is not None and episode.truncated[i]:
-            if episode.bootstrap_values is None or idx[-1] != len(episode.rewards) - 1:
-                raise ValueError("Truncated agents require a final-step bootstrap value")
-            timeouts[-1] = 1.0
-            boot[-1] = episode.bootstrap_values[i]
+            # Bootstrap only when the agent's last active index is the episode end.
+            if (
+                episode.bootstrap_values is not None
+                and idx[-1] == len(episode.rewards) - 1
+            ):
+                timeouts[-1] = 1.0
+                boot[-1] = episode.bootstrap_values[i]
+            # Otherwise treat as a true terminal (already dones[-1]=1).
         advantages[idx, i], returns[idx, i] = compute_gae(
             episode.rewards[idx, i], episode.values[idx, i], dones, gamma, gae_lambda,
             timeouts=timeouts, bootstrap_values=boot)
@@ -516,7 +538,7 @@ def train(args: argparse.Namespace) -> None:
         max_steps=args.max_steps,
         run_id=args.run_id,
         lane_kf=args.lane_kf,
-                    obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
+                    obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
     )
     policy = MARLPolicy(
         obs_dim=observation_dim(probe),
@@ -551,10 +573,11 @@ def train(args: argparse.Namespace) -> None:
                     max_steps=args.max_steps,
                     run_id=args.run_id,
                     lane_kf=args.lane_kf,
-                    obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
+                    obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
                 ),
                 policy,
                 collision_penalty=args.collision_penalty,
+                collision_event_penalty=float(getattr(args, "collision_event_penalty", 0.0)),
             )
             for _ in range(args.episodes_per_update)
         ]
@@ -620,7 +643,7 @@ def main() -> None:
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--critic-lr", type=float, default=1e-3)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gamma", type=float, default=0.95)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
@@ -630,6 +653,7 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=128)
     parser.add_argument("--init-log-std", type=float, default=-1.6)
     parser.add_argument("--collision-penalty", type=float, default=0.0)
+    parser.add_argument("--collision-event-penalty", type=float, default=1.0)
     parser.add_argument("--max-kl", type=float, default=0.01, help="HATRPO trust region")
     parser.add_argument("--cg-iterations", type=int, default=10)
     parser.add_argument("--cg-damping", type=float, default=0.1)
@@ -640,10 +664,11 @@ def main() -> None:
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--save", type=Path, default=None)
     add_validation_args(parser)
-    parser.add_argument("--train-obb-filter", action="store_true")
+    parser.add_argument("--train-obb-filter", action="store_true", default=True)
+    parser.add_argument("--no-train-obb-filter", dest="train_obb_filter", action="store_false")
     args = parser.parse_args()
     if args.save is None:
-        args.save = Path(f"Baselines/checkpoints/v3/{args.algo}_policy.pt")
+        args.save = Path(f"Baselines/checkpoints/revision5/{args.algo}_policy.pt")
     args.max_kl = torch.tensor(float(args.max_kl))
     train(args)
 

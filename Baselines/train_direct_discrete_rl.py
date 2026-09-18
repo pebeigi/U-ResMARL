@@ -40,8 +40,11 @@ from Baselines.training import PPOMemory, collect_episode, PolicySelection, add_
 from RL.train_ppo import compute_gae, compute_gae_by_trajectory
 
 
-def run_episode(scenario, policy, memory, collision_penalty=0.0):
-    return collect_episode(scenario, policy, memory, collision_penalty, discrete=True)
+def run_episode(scenario, policy, memory, collision_penalty=0.0, collision_event_penalty=0.0):
+    return collect_episode(
+        scenario, policy, memory, collision_penalty, discrete=True,
+        collision_event_penalty=collision_event_penalty,
+    )
 
 
 def ppo_update(
@@ -116,7 +119,7 @@ def train(args: argparse.Namespace) -> None:
         max_steps=args.max_steps,
         run_id=args.run_id,
         lane_kf=args.lane_kf,
-                obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
+                obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
     )
     num_actions = num_grid_actions(probe.sim_config)
     policy = DirectDiscretePolicy(
@@ -142,10 +145,14 @@ def train(args: argparse.Namespace) -> None:
                 max_steps=args.max_steps,
                 run_id=args.run_id,
                 lane_kf=args.lane_kf,
-                obb_safety_filter=bool(getattr(args, "train_obb_filter", False)),
+                obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
             )
             episode_stats.append(
-                run_episode(scenario, policy, memory, collision_penalty=args.collision_penalty)
+                run_episode(
+                    scenario, policy, memory,
+                    collision_penalty=args.collision_penalty,
+                    collision_event_penalty=float(getattr(args, "collision_event_penalty", 0.0)),
+                )
             )
 
         stats = ppo_update(policy, optimizer, memory, args)
@@ -195,7 +202,7 @@ def main() -> None:
     parser.add_argument("--run-id", type=int, default=DEFAULT_RUN_ID)
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument("--gamma", type=float, default=0.95)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
@@ -203,18 +210,20 @@ def main() -> None:
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--minibatch-size", type=int, default=512)
     parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--collision-penalty", type=float, default=8.0)
+    parser.add_argument("--collision-penalty", type=float, default=0.0)
+    parser.add_argument("--collision-event-penalty", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("Baselines/checkpoints/v3/direct_discrete_policy.pt"),
+        default=Path("Baselines/checkpoints/revision5/direct_discrete_policy.pt"),
     )
     parser.add_argument("--target-kl", type=float, default=0.02)
     parser.add_argument("--no-anneal-lr", dest="anneal_lr", action="store_false")
     add_validation_args(parser)
-    parser.add_argument("--train-obb-filter", action="store_true")
+    parser.add_argument("--train-obb-filter", action="store_true", default=True)
+    parser.add_argument("--no-train-obb-filter", dest="train_obb_filter", action="store_false")
     train(parser.parse_args())
 
 

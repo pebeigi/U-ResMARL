@@ -104,35 +104,23 @@ def build_scenario(
     env = MultiAgentTrafficEnv(cfg, seed=seed)
     env.reset()
 
-    corridor = load_corridor(run_id, lane_kf)
-    agents: list[AgentInit] = []
-    for i, agent in enumerate(env.agents):
-        start_s = float(corridor.project(agent.pos)[0])
-        agents.append(
-            AgentInit(
-                agent_id=i,
-                pos=np.asarray(agent.pos, dtype=float).copy(),
-                vel=np.asarray(agent.vel, dtype=float).copy(),
-                heading=float(agent.heading),
-                dest=np.asarray(agent.dest, dtype=float).copy(),
-                dest_s=float(env._dest_s[i]),
-                start_s=start_s,
-                desired_speed=float(agent.desired_speed),
-            )
-        )
+    scenario = scenario_from_env(env, seed)
+    scenario.sim_config = _finalize_sim_config(
+        scenario.sim_config, obb_safety_filter, conflict_lookahead, dt)
+    return scenario
 
-    return Scenario(
-        seed=seed,
-        run_id=run_id,
-        lane_kf=lane_kf,
-        dt=dt,
-        max_steps=max_steps,
-        sim_config=_finalize_sim_config(
-            dict(cfg.sim_config), obb_safety_filter, conflict_lookahead, dt
-        ),
-        agents=agents,
-        corridor=corridor,
-    )
+
+def scenario_from_env(env: MultiAgentTrafficEnv, seed: int) -> Scenario:
+    """Snapshot an already-reset environment for the shared rollout recorder."""
+    cfg, corridor = env.config, env.corridor
+    agents = [AgentInit(
+        agent_id=a.agent_id, pos=a.pos.copy(), vel=a.vel.copy(), heading=float(a.heading),
+        dest=a.dest.copy(), dest_s=float(env._dest_s[i]),
+        start_s=float(corridor.project(a.pos)[0]), desired_speed=float(a.desired_speed),
+    ) for i, a in enumerate(env.agents)]
+    return Scenario(seed=seed, run_id=cfg.run_id, lane_kf=cfg.lane_kf, dt=cfg.dt,
+                    max_steps=cfg.max_steps, sim_config=dict(cfg.sim_config),
+                    agents=agents, corridor=corridor)
 
 
 def _finalize_sim_config(

@@ -46,9 +46,9 @@ ALGORITHMS = ("ippo", "mappo", "happo", "hatrpo")
 SEQUENTIAL_ALGORITHMS = ("happo", "hatrpo")
 
 DEFAULT_CHECKPOINTS = {
-    "mappo": Path("Baselines/checkpoints/v3/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/v3/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/v3/hatrpo_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/revision5/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/revision5/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/revision5/hatrpo_policy.pt"),
 }
 
 

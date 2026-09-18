@@ -459,16 +459,22 @@ def candidate_obb_conflict(
     if context is None:
         context = build_step_context(agent_idx, agents[agent_idx], agents, sim_config)
 
+    # Lookahead sample times need not include the execution endpoint (e.g.
+    # 1.5 s / 4 gives .375, .75, 1.125, 1.5 and skips dt=.5). Always check
+    # that endpoint as well. This only changes hard-filter eligibility, not U.
+    endpoint_context = context
+    if abs(context.dt - dt) > 1e-12:
+        endpoint_context = build_step_context(
+            agent_idx, agents[agent_idx], agents, {**sim_config, "dt": dt})
+    if (endpoint_context.neighbor_corners is not None
+            and endpoint_context.neighbor_mu is not None
+            and boxes_overlap_any(cand_pos, cand_heading,
+                                  endpoint_context.neighbor_corners,
+                                  endpoint_context.neighbor_mu, length, width)):
+        return True
+
     samples = list(context.conflict_samples)
     if not samples:
-        if (
-            context.neighbor_corners is not None
-            and context.neighbor_mu is not None
-            and abs(context.dt - dt) < 1e-12
-        ):
-            return boxes_overlap_any(
-                cand_pos, cand_heading, context.neighbor_corners, context.neighbor_mu, length, width
-            )
         return False
 
     ego = agents[agent_idx]

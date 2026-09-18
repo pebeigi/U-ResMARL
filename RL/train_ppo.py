@@ -4,8 +4,7 @@
 Run from repo root:
   python -m RL.train_ppo --calibration Calibration/utility_calibration.json
 
-RLlib alternative (optional, needs ray[rllib] + dm_tree):
-  python -m RL.train_rllib
+See RL/METHOD_NOTES.md for the supported training and evaluation workflow.
 """
 
 from __future__ import annotations
@@ -13,6 +12,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import copy
+from typing import Any
 
 import numpy as np
 
@@ -27,7 +28,8 @@ from RL.calibration_io import (
     residual_scales_for_checkpoint,
 )
 from RL.param_gauge import LEGACY_RESIDUAL_PARAM_KEYS
-from RL.traffic_env import EnvConfig, MultiAgentTrafficEnv
+from RL.traffic_env import EnvConfig, MultiAgentTrafficEnv, SPAWN_PROTOCOL_VERSION
+from RL.transition import DRIVING_REWARD_REVISION
 
 try:
     import torch
@@ -74,11 +76,13 @@ def normalize_obs(obs: torch.Tensor, highway_length: float = 500.0) -> torch.Ten
 #:                          the environment but scored unclipped.
 #:   ``normalized_tanh`` -- Gaussian in [-1, 1]^d, sample clipped then scored.
 #:   ``squashed_tanh``   -- Gaussian in R^d squashed by tanh into [-1, 1]^d with
-#:                          the change-of-variables correction (current default).
+#:                          the change-of-variables correction (parameter ablation).
+#:   ``categorical_utility`` -- masked categorical distribution on utility + residual.
 LEGACY_ACTION_SPACE = "legacy"
 NORMALIZED_ACTION_SPACE = "normalized_tanh"
 SQUASHED_ACTION_SPACE = "squashed_tanh"
 DEFAULT_ACTION_SPACE = SQUASHED_ACTION_SPACE
+CATEGORICAL_ACTION_SPACE = "categorical_utility"
 
 #: Residual interfaces.
 #:   ``candidate_logits`` -- additive residual on the discrete utility grid (default).
@@ -87,6 +91,7 @@ RESIDUAL_MODE_CANDIDATE = "candidate_logits"
 RESIDUAL_MODE_PARAM = "param_delta"
 DEFAULT_RESIDUAL_MODE = RESIDUAL_MODE_CANDIDATE
 CANDIDATE_LOGIT_SCALE = 2.0
+TRAINING_REVISION = 7
 
 #: Floor inside log(1 - tanh(u)^2) so the squash correction stays finite.
 _SQUASH_EPS = 1e-6
@@ -105,11 +110,13 @@ from RL.value_normalization import ValueNormalizer
 
 
 class TorchResidualPolicy(ValueNormalizer):
-    """Shared actor-critic with a bounded Gaussian actor.
+    """Shared actor-critic with categorical utility or legacy Gaussian sampling.
 
     Default residual interface (``candidate_logits``): the actor emits an additive
-    residual over the discrete utility grid so PPO credit assignment is continuous
-    in the executed control.  The legacy ``param_delta`` interface edits Θ instead.
+    residual over the discrete utility grid. Categorical training scores the
+    chosen grid index under softmax(U + residual), retaining the rollout mask.
+    Legacy Gaussian training scores a 63-dimensional noise vector before argmax.
+    Deterministic evaluation maximizes U + residual in both cases.
     """
 
     def __init__(
@@ -124,6 +131,7 @@ class TorchResidualPolicy(ValueNormalizer):
         residual_mode: str = DEFAULT_RESIDUAL_MODE,
         action_dim: int | None = None,
         candidate_logit_scale: float = CANDIDATE_LOGIT_SCALE,
+        candidate_temperature: float = 0.05,
     ):
         super().__init__()
         self.obs_dim = obs_dim
@@ -131,11 +139,19 @@ class TorchResidualPolicy(ValueNormalizer):
         self.param_gauge = str(param_gauge)
         self.action_space = str(action_space)
         self.residual_mode = str(residual_mode)
+        if self.action_space == CATEGORICAL_ACTION_SPACE:
+            if self.residual_mode != RESIDUAL_MODE_CANDIDATE:
+                raise ValueError("Categorical utility policy requires candidate_logits mode")
+            if not np.isfinite(candidate_temperature) or candidate_temperature <= 0:
+                raise ValueError("candidate_temperature must be finite and positive")
+            self.register_buffer("candidate_temperature", torch.tensor(float(candidate_temperature)))
         self._residual_keys = (
             LEGACY_RESIDUAL_PARAM_KEYS if self.param_gauge == "additive" else RESIDUAL_PARAM_KEYS
         )
         if self.residual_mode == RESIDUAL_MODE_CANDIDATE:
             dim = int(action_dim if action_dim is not None else 63)
+            if not np.isfinite(candidate_logit_scale) or candidate_logit_scale <= 0:
+                raise ValueError("candidate_logit_scale must be finite and positive")
             scale_vec = torch.full((dim,), float(candidate_logit_scale), dtype=torch.float32)
             self._residual_keys = tuple(f"c{i}" for i in range(dim))
         else:
@@ -148,7 +164,6 @@ class TorchResidualPolicy(ValueNormalizer):
         self.register_buffer("residual_scales", scale_vec)
         self.register_buffer("highway_length", torch.tensor(float(highway_length)))
         # Running statistics of the return, used to normalize the critic target.
-        # Kept for older checkpoint / visualize_simulation compatibility.
         self.residual_scale = float(scale_vec.mean().item())
 
         actor_layers: list[nn.Module] = [
@@ -200,16 +215,34 @@ class TorchResidualPolicy(ValueNormalizer):
         return torch.exp(self.log_std.clamp(-5.0, 0.0)).expand_as(mean)
 
     def distribution(self, obs: torch.Tensor) -> tuple[torch.distributions.Normal, torch.Tensor]:
+        if self.action_space == CATEGORICAL_ACTION_SPACE:
+            raise ValueError("Use categorical_distribution with utility scores and an action mask")
         mean, value = self.forward(obs)
         return torch.distributions.Normal(mean, self._stddev(mean)), value
 
-    def log_prob(self, obs: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Log-density of ``action`` plus the Gaussian entropy and normalized value.
+    def categorical_distribution(self, obs, utilities, mask):
+        if utilities is None or mask is None:
+            raise ValueError("Categorical PPO requires the rollout utility scores and action mask")
+        mean, value_norm = self.evaluate(obs)
+        utilities = torch.as_tensor(utilities, dtype=mean.dtype, device=mean.device)
+        mask = torch.as_tensor(mask, dtype=torch.bool, device=mean.device)
+        if utilities.shape != mean.shape or mask.shape != mean.shape or not mask.any(dim=-1).all():
+            raise ValueError("Invalid categorical context shape or empty action mask")
+        logits = (utilities + mean * self.residual_scales) / self.candidate_temperature
+        logits = logits.masked_fill(~mask, -torch.inf)
+        return torch.distributions.Categorical(logits=logits), value_norm
+
+    def log_prob(self, obs: torch.Tensor, action: torch.Tensor, utilities=None,
+                 mask=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Action log-probability, distribution entropy and normalized value.
 
         For the squashed policy ``action`` is the pre-squash sample ``u``; the
         tanh change of variables is subtracted so the density refers to the
         bounded residual that was actually executed.
         """
+        if self.action_space == CATEGORICAL_ACTION_SPACE:
+            dist, value_norm = self.categorical_distribution(obs, utilities, mask)
+            return dist.log_prob(action.long()), dist.entropy(), value_norm
         mean, value_norm = self.evaluate(obs)
         std = self._stddev(mean)
         dist = torch.distributions.Normal(mean, std)
@@ -223,7 +256,7 @@ class TorchResidualPolicy(ValueNormalizer):
             return torch.tanh(action) * self.residual_scales
         bound = self.action_bound()
         bounded = torch.clamp(action, -bound, bound)
-        if self.action_space == NORMALIZED_ACTION_SPACE:
+        if self.action_space in (NORMALIZED_ACTION_SPACE, CATEGORICAL_ACTION_SPACE):
             bounded = bounded * self.residual_scales
         return bounded
 
@@ -246,6 +279,9 @@ class TorchResidualPolicy(ValueNormalizer):
         """Deterministic (mean) residual; used by evaluation and visualization."""
         from RL.obs import adapt_observation
 
+        if self.action_space == CATEGORICAL_ACTION_SPACE and explore_std > 0:
+            raise ValueError("Categorical exploration requires sample_action with utility context")
+
         obs_t = torch.as_tensor(adapt_observation(obs, self.obs_dim), dtype=torch.float32)
         with torch.no_grad():
             mean, _ = self.evaluate(obs_t)
@@ -259,9 +295,16 @@ class TorchResidualPolicy(ValueNormalizer):
                 log_prob = torch.zeros(())
         return self.action_to_env(action.cpu().numpy()), log_prob
 
-    def sample_action(self, obs: np.ndarray):
+    def sample_action(self, obs: np.ndarray, utilities=None, mask=None):
         """Sample the action the environment will execute, and score that action."""
         obs_t = torch.as_tensor(obs, dtype=torch.float32)
+        if self.action_space == CATEGORICAL_ACTION_SPACE:
+            from RL.candidate_policy import CandidateIndex
+            with torch.no_grad():
+                dist, value_norm = self.categorical_distribution(obs_t, utilities, mask)
+                action = dist.sample()
+            return (CandidateIndex(int(action)), action.cpu().numpy(),
+                    float(dist.log_prob(action)), float(self.denormalize_value(value_norm)))
         with torch.no_grad():
             mean, value_norm = self.evaluate(obs_t)
             std = self._stddev(mean)
@@ -289,31 +332,50 @@ class PPOMemory:
     bootstrap_values: list[float]
     #: Identifies the (episode, agent) trajectory a transition belongs to.
     traj_ids: list[int]
+    utilities: list[np.ndarray] | None = None
+    action_masks: list[np.ndarray] | None = None
 
 
 def collect_rollouts(
     env: MultiAgentTrafficEnv,
     policy: TorchResidualPolicy,
     episodes_per_update: int,
+    *, episode_seeds: list[int] | None = None, gamma: float = 0.99,
 ) -> tuple[PPOMemory, list[float], list[int], list[float], dict[str, float]]:
     memory = PPOMemory([], [], [], [], [], [], [], [], [])
+    categorical = policy.action_space == CATEGORICAL_ACTION_SPACE
+    if categorical:
+        memory.utilities, memory.action_masks = [], []
     metrics: list[float] = []
     collisions: list[int] = []
+    events: list[int] = []
     realism: list[float] = []
+    episode_returns, discounted_returns = [], []
     flips = 0
     decisions = 0
     num_agents = len(env.agents) if env.agents else env.config.num_agents
 
     for episode in range(episodes_per_update):
+        if episode_seeds is not None:
+            env.rng = np.random.default_rng(episode_seeds[episode])
         obs_list = env.reset()
         num_agents = len(env.agents)
         done = False
         info: dict = {}
+        episode_return = discounted_return = 0.0
         while not done:
-            active = [i for i, a in enumerate(env.agents) if not a.reached_destination]
+            active = [i for i, a in enumerate(env.agents)
+                      if not a.reached_destination and i not in env.collided_agents]
             residual_actions: list = [None for _ in env.agents]
             for i in active:
-                env_action, action_np, log_prob, value = policy.sample_action(obs_list[i])
+                if categorical:
+                    context = env.candidate_context(i)
+                    env_action, action_np, log_prob, value = policy.sample_action(
+                        obs_list[i], context.utilities, context.mask)
+                    memory.utilities.append(context.utilities.copy())
+                    memory.action_masks.append(context.mask.copy())
+                else:
+                    env_action, action_np, log_prob, value = policy.sample_action(obs_list[i])
                 residual_actions[i] = env_action
                 memory.observations.append(obs_list[i])
                 memory.actions.append(action_np)
@@ -321,17 +383,21 @@ def collect_rollouts(
                 memory.values.append(value)
                 memory.traj_ids.append(episode * num_agents + i)
 
+            step = env.step_count
             obs_list, rewards, done, info = env.step(residual_actions)
+            episode_return += float(np.sum(rewards)) / num_agents
+            discounted_return += gamma**step * float(np.sum(rewards)) / num_agents
             truncated = bool(info.get("truncated", False))
             flips += int(info.get("control_flips", 0))
             decisions += int(info.get("control_decisions", 0))
             for i in active:
                 memory.rewards.append(float(rewards[i]))
                 agent_terminal = bool(env.agents[i].reached_destination) or (
-                    done and not truncated
+                    i in env.collided_agents) or (done and not truncated
                 )
                 memory.dones.append(float(agent_terminal))
-                is_timeout = bool(truncated and not env.agents[i].reached_destination)
+                is_timeout = bool(truncated and not env.agents[i].reached_destination
+                                  and i not in env.collided_agents)
                 memory.timeouts.append(float(is_timeout))
                 boot = 0.0
                 if is_timeout:
@@ -344,12 +410,18 @@ def collect_rollouts(
 
         metrics.append(env.rollout_metric())
         collisions.append(env.collision_count)
+        events.append(env.collision_events)
         realism.append(float(info.get("realism_distance", float("nan"))))
+        episode_returns.append(episode_return)
+        discounted_returns.append(discounted_return)
 
     aux = {
+        "collision_events": float(np.mean(events)),
         "control_flip_rate": float(flips / decisions) if decisions else 0.0,
         "control_flips": float(flips),
         "control_decisions": float(decisions),
+        "mean_return": float(np.mean(episode_returns)),
+        "discounted_return": float(np.mean(discounted_returns)),
     }
     return memory, metrics, collisions, realism, aux
 
@@ -448,6 +520,22 @@ def compute_gae_by_trajectory(
     return advantages, returns
 
 
+def categorical_kl_from_logits(old_logits, new_logits, mask):
+    """KL on the shared rollout mask without treating underflow as lost support.
+
+    Categorical probabilities can round to zero at low temperature even though
+    their log probabilities are finite. Compute in log space with float64;
+    only the recorded hard mask defines which actions are impossible.
+    """
+    if (not torch.isfinite(old_logits[mask]).all()
+            or not torch.isfinite(new_logits[mask]).all()):
+        raise FloatingPointError("Non-finite categorical logit on an eligible action")
+    old_logp = torch.log_softmax(old_logits.double().masked_fill(~mask, -torch.inf), dim=-1)
+    new_logp = torch.log_softmax(new_logits.double().masked_fill(~mask, -torch.inf), dim=-1)
+    difference = (old_logp - new_logp).masked_fill(~mask, 0.)
+    return (old_logp.exp() * difference).sum(dim=-1).clamp_min(0.)
+
+
 def ppo_update(
     policy: TorchResidualPolicy,
     optimizer: torch.optim.Optimizer,
@@ -464,6 +552,14 @@ def ppo_update(
     obs = torch.as_tensor(np.array(memory.observations), dtype=torch.float32)
     actions = torch.as_tensor(np.array(memory.actions), dtype=torch.float32)
     old_log_probs = torch.as_tensor(np.array(memory.log_probs), dtype=torch.float32)
+    utilities = (None if memory.utilities is None else
+                 torch.as_tensor(np.asarray(memory.utilities), dtype=torch.float32))
+    action_masks = (None if memory.action_masks is None else
+                    torch.as_tensor(np.asarray(memory.action_masks), dtype=torch.bool))
+    old_distribution = None
+    if policy.action_space == CATEGORICAL_ACTION_SPACE:
+        with torch.no_grad():
+            old_distribution, _ = policy.categorical_distribution(obs, utilities, action_masks)
     values_np = np.array(memory.values, dtype=np.float32)
     rewards_np = np.array(memory.rewards, dtype=np.float32)
     traj_np = np.array(memory.traj_ids, dtype=np.int64)
@@ -505,16 +601,34 @@ def ppo_update(
         "clip_frac": 0.0,
         "explained_variance": explained_variance,
         "epochs_run": 0.0,
+        "early_stop": 0.0,
     }
+    stopped = False
     for epoch in range(epochs):
         np.random.shuffle(indices)
         epoch_kl: list[float] = []
         epoch_clip: list[float] = []
         for start in range(0, n, minibatch_size):
             batch_idx = indices[start : start + minibatch_size]
-            new_log_probs, entropy_terms, value_norm = policy.log_prob(
-                obs[batch_idx], actions[batch_idx]
-            )
+            if old_distribution is not None:
+                current, value_norm = policy.categorical_distribution(
+                    obs[batch_idx], utilities[batch_idx], action_masks[batch_idx])
+                new_log_probs = current.log_prob(actions[batch_idx].long())
+                entropy_terms = current.entropy()
+                with torch.no_grad():
+                    batch_kl = float(categorical_kl_from_logits(
+                        old_distribution.logits[batch_idx], current.logits,
+                        action_masks[batch_idx]).mean())
+            else:
+                new_log_probs, entropy_terms, value_norm = policy.log_prob(obs[batch_idx], actions[batch_idx])
+                log_ratio_check = new_log_probs - old_log_probs[batch_idx]
+                batch_kl = float(((log_ratio_check.exp() - 1) - log_ratio_check).mean().detach())
+            epoch_kl.append(batch_kl)
+            # Check before taking another step, not after a full PPO epoch.
+            if target_kl > 0 and batch_kl > target_kl:
+                stopped = True
+                last_stats["early_stop"] = 1.0
+                break
             entropy = entropy_terms.mean()
 
             log_ratio = new_log_probs - old_log_probs[batch_idx]
@@ -533,7 +647,6 @@ def ppo_update(
                 policy.log_std.clamp_(-5.0, 0.0)
 
             with torch.no_grad():
-                epoch_kl.append(float(((ratio - 1.0) - log_ratio).mean()))
                 epoch_clip.append(float((ratio - 1.0).abs().gt(clip_coef).float().mean()))
 
             last_stats.update(
@@ -548,7 +661,7 @@ def ppo_update(
         last_stats["clip_frac"] = float(np.mean(epoch_clip)) if epoch_clip else 0.0
         last_stats["epochs_run"] = float(epoch + 1)
         # Stop before the policy walks outside the region the rollout supports.
-        if target_kl > 0.0 and mean_kl > target_kl:
+        if stopped:
             break
 
     return last_stats
@@ -563,20 +676,20 @@ def make_env(
     base_params = None
     if args.calibration is not None:
         base_params = load_base_params(args.calibration, prefer=args.prefer_params)
-    # Training turns the hard OBB filter off so residual/collision learning sees a
-    # reachable safety signal; evaluation can override this back on.
+    # Match the controller used at evaluation; filter-off is an explicit ablation.
     if obb_safety_filter is None:
-        obb_safety_filter = bool(getattr(args, "train_obb_filter", False))
+        obb_safety_filter = bool(getattr(args, "train_obb_filter", True))
     cfg_kwargs = dict(
         max_steps=args.max_steps,
         num_agents=args.num_agents,
         base_params=base_params,
         collision_penalty=float(getattr(args, "collision_penalty", 0.0)),
+        collision_event_penalty=float(getattr(args, "collision_event_penalty", 0.0)),
         behavior_coef=float(getattr(args, "behavior_coef", 0.0)),
         behavior_shaping_coef=float(getattr(args, "behavior_shaping_coef", 0.0)),
         residual_mode=str(getattr(args, "residual_mode", DEFAULT_RESIDUAL_MODE)),
-        leftover_coef=float(getattr(args, "leftover_coef", 0.05)),
-        arrival_bonus=float(getattr(args, "arrival_bonus", 5.0)),
+        leftover_coef=float(getattr(args, "leftover_coef", 0.08)),
+        arrival_bonus=float(getattr(args, "arrival_bonus", 8.0)),
         obb_safety_filter=bool(obb_safety_filter),
     )
     if getattr(args, "dense_spawn", False):
@@ -593,44 +706,85 @@ def evaluate_deterministic(
     seeds: list[int],
     *,
     obb_safety_filter: bool = True,
-) -> dict[str, float]:
+    label: str | None = None,
+) -> dict[str, Any]:
     """Roll out ``policy`` with mean actions under the benchmark safety setting."""
+    from Baselines.metrics import rollout_metrics
+    from Baselines.runner import RolloutRecorder
+    from Baselines.scenario import scenario_from_env
     metrics: list[float] = []
     collisions: list[float] = []
+    collision_events: list[float] = []
     arrivals: list[float] = []
     usage: list[float] = []
     flips = 0
     decisions = 0
+    episodes = []
     scales = (
         policy.residual_scales.detach().cpu().numpy() if policy is not None else None
     )
-    for seed in seeds:
+    for episode, seed in enumerate(seeds, 1):
+        if label:
+            print(f"{label}: episode {episode}/{len(seeds)} (seed {seed})", flush=True)
         env = make_env(args, seed=int(seed), obb_safety_filter=obb_safety_filter)
+        env.config.accept_residual_if_better = policy is not None
         obs_list = env.reset()
+        recorder = RolloutRecorder(scenario_from_env(env, int(seed)), env.agents,
+                                   "utility" if policy is None else "residual_marl")
         done = False
         info: dict = {}
+        episode_return = discounted_return = 0.0
         while not done:
             actions = None
             if policy is not None:
                 actions = [policy.act(obs, 0.0)[0] for obs in obs_list]
-                for delta in actions:
+                for agent, delta in zip(env.agents, actions):
+                    if agent.reached_destination:
+                        continue
                     arr = np.asarray(
                         list(delta.values()) if isinstance(delta, dict) else delta,
                         dtype=float,
                     )
                     usage.append(float(np.mean(np.abs(arr) / scales)))
-            obs_list, _, done, info = env.step(actions)
+            step = env.step_count
+            obs_list, rewards, done, info = env.step(actions)
+            episode_return += float(np.sum(rewards)) / len(env.agents)
+            discounted_return += float(getattr(args, "gamma", .99))**step * float(np.sum(rewards)) / len(env.agents)
+            recorder.record(env.agents,
+                            [(c["accel"], c["steering"]) for c in info["selected_controls"]],
+                            env._collision_pairs)
             flips += int(info.get("control_flips", 0))
             decisions += int(info.get("control_decisions", 0))
         metrics.append(float(env.rollout_metric()))
         collisions.append(float(env.collision_count))
+        collision_events.append(float(env.collision_events))
         arrivals.append(float(np.mean([bool(a.reached_destination) for a in env.agents])))
+        episodes.append({**rollout_metrics(recorder.result()), "seed": int(seed), "metric": metrics[-1],
+                         "collision_pair_steps": collisions[-1],
+                         "collision_events": collision_events[-1], "arrival_rate": arrivals[-1],
+                         "mean_return": episode_return, "discounted_return": discounted_return,
+                         "leftover_distance": metrics[-1] - 10.0 * collisions[-1]})
+    # The same per-episode definitions as Baselines.benchmark, excluding metadata.
+    metric_keys = ("offroad_rate", "offroad_agent_frac", "collision_rate_per_agent",
+                   "mean_return", "discounted_return",
+                   "min_gap_m", "p5_gap_m", "min_ttc_s", "unsafe_ttc_rate", "goal_progress",
+                   "mean_travel_time_s", "mean_capped_travel_time_s", "mean_speed_mps",
+                   "speed_std_mps", "mean_abs_accel", "rms_jerk", "mean_abs_steering",
+                   "mean_abs_lateral_m", "min_clearance_m", "wall_time_per_agent_step_ms",
+                   "closed_loop_score")
+    shared_metrics = {}
+    for key in metric_keys:
+        values = [row[key] for row in episodes if np.isfinite(row[key])]
+        shared_metrics[key] = float(np.mean(values)) if values else float("nan")
     return {
+        **shared_metrics,
         "metric": float(np.mean(metrics)),
         "collisions": float(np.mean(collisions)),
+        "collision_events": float(np.mean(collision_events)),
         "arrival_rate": float(np.mean(arrivals)),
         "residual_usage": float(np.mean(usage)) if usage else 0.0,
         "control_flip_rate": float(flips / decisions) if decisions else 0.0,
+        "episode_results": episodes,
     }
 
 
@@ -659,7 +813,7 @@ def _plot_curve(path: Path, rows: list[dict[str, float]]) -> Path:
     axes[0, 0].plot(
         updates, [r["prior_val_metric"] for r in rows], "--", color="#7f7f7f", label="utility prior"
     )
-    axes[0, 0].set_ylabel("leftover distance (↓)")
+    axes[0, 0].set_ylabel("distance + 10 × collision pair-steps (↓)")
     axes[0, 0].legend(frameon=False)
 
     axes[0, 1].plot(updates, [r["val_arrival_rate"] for r in rows], "o-", color="#2ca02c", label="residual")
@@ -713,12 +867,23 @@ def _curve_row(
         "update": float(update),
         "train_metric": float(train_metric),
         "val_metric": val["metric"],
+        "val_closed_loop_score": val.get("closed_loop_score", float("nan")),
         "val_arrival_rate": val["arrival_rate"],
         "val_collisions": val["collisions"],
+        "val_collision_events": val.get("collision_events", float("nan")),
         "residual_usage": val.get("residual_usage", 0.0),
         "control_flip_rate": val.get("control_flip_rate", 0.0),
         "prior_val_metric": prior_val["metric"],
+        "prior_val_closed_loop_score": prior_val.get("closed_loop_score", float("nan")),
+        "prior_val_collisions": prior_val["collisions"],
+        "prior_val_collision_events": prior_val.get("collision_events", float("nan")),
         "prior_val_arrival_rate": prior_val["arrival_rate"],
+        "train_return": stats.get("mean_return", float("nan")),
+        "train_discounted_return": stats.get("discounted_return", float("nan")),
+        "val_return": val.get("mean_return", float("nan")),
+        "val_discounted_return": val.get("discounted_return", float("nan")),
+        "prior_val_return": prior_val.get("mean_return", float("nan")),
+        "prior_val_discounted_return": prior_val.get("discounted_return", float("nan")),
         "explained_variance": stats.get("explained_variance", float("nan")),
         "approx_kl": stats.get("approx_kl", float("nan")),
         "clip_frac": stats.get("clip_frac", float("nan")),
@@ -734,57 +899,189 @@ def _persist_curve(path: Path | None, rows: list[dict[str, float]]) -> None:
     _plot_curve(path, rows)
 
 
-def _validation_score(stats: dict[str, float]) -> tuple[float, float]:
-    """Rank validation points by collisions first, then leftover distance."""
-    return (stats["collisions"], stats["metric"])
+def _validation_score(stats: dict[str, float]) -> tuple[float, ...]:
+    """Rank by NAVSIM-style closed-loop score, then leftover task terms."""
+    from RL.closed_loop_score import closed_loop_score
+    pdms = float(stats["closed_loop_score"]) if "closed_loop_score" in stats else closed_loop_score(stats)
+    return (-pdms,
+            stats.get("collision_events", stats["collisions"]),
+            stats["collisions"], -stats["arrival_rate"], stats["metric"])
 
 
-def baseline_metric(args: argparse.Namespace) -> float:
-    seeds = [args.seed + i for i in range(max(1, args.baseline_episodes))]
-    return evaluate_deterministic(args, None, seeds)["metric"]
+# Hard safety non-regression vs the utility prior. Comfort and TTC enter the
+# PDMS weighted average instead of vetoing a safer, more complete policy.
+VALIDATION_OBJECTIVES = {
+    "collision_events": -1, "collisions": -1, "offroad_rate": -1,
+}
+
+
+def validation_regressions(candidate, prior) -> list[str]:
+    """Expose each hard safety objective that fails the matched comparison."""
+    return [key for key, direction in VALIDATION_OBJECTIVES.items()
+            if key in prior and (key not in candidate or not np.isfinite(candidate[key])
+                                 or direction * (candidate[key] - prior[key]) < -1e-8)]
+
+
+def _validation_improves(candidate, incumbent, prior) -> bool:
+    """Safety non-regression vs utility, then higher closed-loop score than incumbent."""
+    return (not validation_regressions(candidate, prior)
+            and _validation_score(candidate) < _validation_score(incumbent))
+
+
+def experiment_seeds(args):
+    """Explicit scenario seeds; all episodes, not just update seeds, are checked."""
+    for key in ("updates", "episodes_per_update", "num_agents", "max_steps",
+                "val_episodes", "test_episodes"):
+        if int(getattr(args, key)) <= 0:
+            raise ValueError(f"{key} must be positive")
+    if args.episodes_per_update >= 1000:
+        raise ValueError("episodes_per_update must be below the 1000-seed update stride")
+    training = [[int(args.seed + update * 1000 + ep)
+                 for ep in range(args.episodes_per_update)]
+                for update in range(1, args.updates + 1)]
+    validation = list(range(int(getattr(args, "validation_seed_start", 910_000)),
+                            int(getattr(args, "validation_seed_start", 910_000)) + args.val_episodes))
+    test = list(range(int(getattr(args, "test_seed_start", 810_000)),
+                      int(getattr(args, "test_seed_start", 810_000)) + args.test_episodes))
+    train_set = {seed for block in training for seed in block}
+    if (train_set & set(validation) or train_set & set(test)
+            or set(validation) & set(test)):
+        raise ValueError("Training, validation and test scenario seeds must be disjoint")
+    return training, validation, test
+
+
+def _atomic_save(blob, path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.save(blob, temporary)
+    temporary.replace(path)
+
+
+def _export_checkpoint(blob, path):
+    """Write the controller and a readable report without a separate verifier script."""
+    import json
+    def finite_json(value):
+        if isinstance(value, dict):
+            return {key: finite_json(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [finite_json(item) for item in value]
+        if isinstance(value, float) and not np.isfinite(value):
+            return None
+        return value
+    _atomic_save(blob, path)
+    summary = Path(path).with_suffix(".summary.json")
+    temporary = summary.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(finite_json({k: v for k, v in blob.items() if k != "state_dict"}),
+                                    indent=2, allow_nan=False), encoding="utf-8")
+    temporary.replace(summary)
+
+
+def _training_fingerprint(args):
+    """Reject a resume if code or the frozen calibration has changed."""
+    import hashlib
+    root = Path(__file__).resolve().parent.parent
+    sources = sorted((root / "RL").glob("*.py")) + [root / "utility_model.py"]
+    sources += [root / "Baselines" / name for name in ("runner.py", "metrics.py", "scenario.py")]
+    if args.calibration is not None:
+        sources.append(Path(args.calibration))
+    digest = hashlib.sha256()
+    for source in sources:
+        digest.update(source.name.encode())
+        digest.update(source.read_bytes())
+    return digest.hexdigest()
+
+
+def _checkpoint_metadata(args, env, policy):
+    return {
+        "protocol_version": 3, "spawn_protocol_version": SPAWN_PROTOCOL_VERSION,
+        "training_revision": TRAINING_REVISION, "collision_filter_revision": 2,
+        "driving_reward_revision": DRIVING_REWARD_REVISION,
+        "selection_rule": "pdms_safety_non_regression",
+        "validation_objectives": VALIDATION_OBJECTIVES,
+        "obs_dim": env.obs_dim, "hidden_dim": args.hidden_dim,
+        "residual_scale": policy.residual_scale,
+        "residual_scales": dict(zip(policy._residual_keys, policy.residual_scales.tolist())),
+        "param_gauge": PARAM_GAUGE, "action_space": policy.action_space,
+        "candidate_temperature": float(getattr(args, "candidate_temperature", .005)),
+        "residual_mode": policy.residual_mode, "action_dim": env.residual_dim,
+        "highway_length": env.config.highway_length, "algo": "ppo",
+        "base_params": dict(env.config.base_params), "prefer_params": args.prefer_params,
+        "calibration": str(args.calibration) if args.calibration else None,
+        "train_obb_filter": bool(env.config.sim_config["obb_safety_filter"]),
+        "boundary_safety_filter": bool(env.config.sim_config["boundary_safety_filter"]),
+        "boundary_margin": env.config.sim_config["boundary_margin"],
+        "num_agents": args.num_agents, "max_steps": args.max_steps,
+        "dense_spawn": bool(getattr(args, "dense_spawn", False)),
+        "seed": args.seed, "reward_weights": dict(env.config.reward_weights),
+        "leftover_coef": env.config.leftover_coef, "arrival_bonus": env.config.arrival_bonus,
+        "collision_penalty": args.collision_penalty,
+        "collision_event_penalty": float(getattr(args, "collision_event_penalty", 0.0)),
+        "gamma": float(args.gamma),
+        "behavior_coef": args.behavior_coef, "behavior_shaping_coef": args.behavior_shaping_coef,
+    }
 
 
 def train(args: argparse.Namespace) -> None:
+    train_seeds, val_seeds, test_seeds = experiment_seeds(args)
+    fingerprint = _training_fingerprint(args)
+    resumed = None
+    if getattr(args, "resume", None) is not None:
+        resumed = torch.load(args.resume, map_location="cpu", weights_only=False)
+        if resumed["fingerprint"] != fingerprint:
+            raise ValueError("Code or calibration changed since the resume checkpoint")
+        if resumed.get("complete", False):
+            print("This run is already complete.")
+            return
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
     probe_env = make_env(args, seed=args.seed)
     residual_mode = str(getattr(args, "residual_mode", DEFAULT_RESIDUAL_MODE))
+    action_space = getattr(args, "policy_action_space", "auto")
+    if action_space == "auto":
+        action_space = (CATEGORICAL_ACTION_SPACE if residual_mode == RESIDUAL_MODE_CANDIDATE
+                        else SQUASHED_ACTION_SPACE)
     policy = TorchResidualPolicy(
         probe_env.obs_dim,
         hidden_dim=args.hidden_dim,
         residual_scales=DEFAULT_RESIDUAL_SCALES,
         highway_length=float(probe_env.config.highway_length),
         residual_mode=residual_mode,
+        action_space=action_space,
         action_dim=probe_env.residual_dim,
+        candidate_logit_scale=float(getattr(args, "candidate_logit_scale", CANDIDATE_LOGIT_SCALE)),
+        candidate_temperature=float(getattr(args, "candidate_temperature", 0.005)),
     )
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
 
     if args.calibration is not None:
         print(f"Using {args.prefer_params} utility params from {args.calibration}")
     print(
-        f"Residual mode={residual_mode} | action_dim={probe_env.residual_dim} | "
-        f"train_obb_filter={bool(getattr(args, 'train_obb_filter', False))}"
+        f"Residual mode={residual_mode} | policy={action_space} | action_dim={probe_env.residual_dim} | "
+        f"train_obb_filter={bool(probe_env.config.sim_config['obb_safety_filter'])}"
     )
-    if args.collision_penalty > 0.0:
-        print(f"OBB collision penalty = {args.collision_penalty:.2f} per colliding agent-step")
+    if args.collision_penalty > 0.0 or float(getattr(args, "collision_event_penalty", 0.0)) > 0.0:
+        print(
+            f"OBB contact terminal = {float(getattr(args, 'collision_event_penalty', 0.0)):.2f}, "
+            f"duration = {args.collision_penalty:.2f} "
+            f"(gamma={args.gamma:.3f})"
+        )
     if args.behavior_coef > 0.0 or args.behavior_shaping_coef > 0.0:
         print(
             f"Behavioral data term: band={args.behavior_coef:.2f}, "
             f"shaping={args.behavior_shaping_coef:.2f}"
         )
-    base = baseline_metric(args)
-    print(f"Utility-only baseline metric over {args.baseline_episodes} episodes: {base:.3f}")
-
-    # Three disjoint seed blocks: training (seed + update*1000), selection, and a
-    # test set that is never used for selection so the reported number is honest.
-    val_seeds = [args.seed + 900_000 + k for k in range(max(1, args.val_episodes))]
-    test_seeds = [args.seed + 700_000 + k for k in range(max(1, args.test_episodes))]
-    prior_val = evaluate_deterministic(args, None, val_seeds, obb_safety_filter=True)
+    if resumed is None:
+        prior_val = evaluate_deterministic(args, None, val_seeds, obb_safety_filter=True, label="Prior validation")
+    else:
+        prior_val = resumed["prior_val"]
     print(
         f"Prior on {len(val_seeds)} held-out validation episodes (filter ON): "
-        f"metric={prior_val['metric']:.3f} | collisions={prior_val['collisions']:.2f} | "
-        f"arrival={prior_val['arrival_rate']:.3f}"
+        f"metric={prior_val['metric']:.3f} | pair_steps={prior_val['collisions']:.2f} | "
+        f"events={prior_val['collision_events']:.2f} | "
+        f"arrival={prior_val['arrival_rate']:.3f} | "
+        f"pdms={prior_val.get('closed_loop_score', float('nan')):.3f}"
     )
 
     curve_path = args.curve
@@ -800,50 +1097,113 @@ def train(args: argparse.Namespace) -> None:
              "clip_frac": float("nan"), "entropy": float("nan"), "value_loss": float("nan")},
         )
     ]
-    _persist_curve(curve_path, curve_rows)
+    if resumed is None:
+        _persist_curve(curve_path, curve_rows)
 
     best_metric = float("inf")
-    best_val: dict[str, float] | None = None
+    # The zero-initialized deterministic actor exactly reproduces the prior.
+    # Include it in selection so failed learning cannot replace it with a
+    # validation-regressing residual. This is a fallback, not learned improvement.
+    best_val: dict[str, float] | None = dict(prior_val)
     best_update = 0
-    best_state = None
+    validation_history = []
+    best_state = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items()}
     val_every = max(1, args.val_every)
-    for update in range(1, args.updates + 1):
+    start_update = 1
+    if resumed is not None:
+        policy.load_state_dict(resumed["state_dict"])
+        optimizer.load_state_dict(resumed["optimizer"])
+        best_state, best_val = resumed["best_state"], resumed["best_val"]
+        best_update, best_metric = resumed["best_update"], resumed["best_metric"]
+        curve_rows = resumed["curve_rows"]
+        validation_history = resumed.get("validation_history", [])
+        torch.set_rng_state(resumed["torch_rng"])
+        np.random.set_state(resumed["numpy_rng"])
+        start_update = resumed["update"] + (0 if resumed["pending_evaluation"] else 1)
+        print(f"Resuming after saved update {resumed['update']}")
+
+    def selected_checkpoint(update, *, policy_test=None, prior_test=None):
+        blob = _checkpoint_metadata(args, probe_env, policy)
+        blob.update(state_dict=best_state, selected_update=best_update, updates=update,
+                    selection_status="utility_fallback" if best_update == 0 else "learned_residual",
+                    evaluation_status="validation_only" if policy_test is None else "test_complete",
+                    val_seeds=val_seeds, test_seeds=test_seeds, train_scenario_seeds=train_seeds,
+                    validation=best_val, prior_validation=prior_val,
+                    validation_history=validation_history)
+        reports = {"val": best_val, "prior_val": prior_val}
+        if policy_test is not None:
+            blob.update(test=policy_test, prior_test=prior_test)
+            reports.update(test=policy_test, prior_test=prior_test)
+        # Preserve the small flat summary consumed by older analysis scripts.
+        for prefix, report in reports.items():
+            for key in ("metric", "collisions", "collision_events", "arrival_rate", "control_flip_rate"):
+                blob[f"{prefix}_{key}"] = float(report.get(key, 0.0))
+        return blob
+
+    def save_progress(update, *, pending=False, diagnostics=None, complete=False):
+        if args.save is None:
+            return
+        state = {
+            "fingerprint": fingerprint, "args": vars(args), "update": update,
+            "pending_evaluation": pending, "diagnostics": diagnostics,
+            "state_dict": policy.state_dict(), "optimizer": optimizer.state_dict(),
+            "best_state": best_state, "best_val": best_val, "best_update": best_update,
+            "best_metric": best_metric, "prior_val": prior_val, "curve_rows": curve_rows,
+            "validation_history": validation_history,
+            "torch_rng": torch.get_rng_state(), "numpy_rng": np.random.get_state(),
+            "complete": complete,
+        }
+        _atomic_save(state, args.save.with_suffix(".resume.pt"))
+        if complete:
+            return
+        # Export the selected controller before the expensive test phase too.
+        _export_checkpoint(selected_checkpoint(update), args.save)
+
+    if resumed is None:
+        save_progress(0)
+    for update in range(start_update, args.updates + 1):
         if args.anneal_lr:
             frac = 1.0 - (update - 1) / max(args.updates, 1)
             for group in optimizer.param_groups:
                 group["lr"] = args.lr * frac
 
-        env = make_env(args, seed=args.seed + update * 1000)
-        memory, metrics, collisions, realism, aux = collect_rollouts(
-            env, policy, args.episodes_per_update
-        )
-        stats = ppo_update(
-            policy,
-            optimizer,
-            memory,
-            gamma=args.gamma,
-            gae_lambda=args.gae_lambda,
-            clip_coef=args.clip_coef,
-            value_coef=args.value_coef,
-            entropy_coef=args.entropy_coef,
-            epochs=args.ppo_epochs,
-            minibatch_size=args.minibatch_size,
-            target_kl=args.target_kl,
-        )
+        if resumed is not None and resumed["pending_evaluation"] and update == resumed["update"]:
+            metrics, collisions, realism, aux, stats = resumed["diagnostics"]
+        else:
+            env = make_env(args, seed=train_seeds[update - 1][0])
+            memory, metrics, collisions, realism, aux = collect_rollouts(
+                env, policy, args.episodes_per_update, episode_seeds=train_seeds[update - 1], gamma=args.gamma)
+            stats = ppo_update(
+                policy, optimizer, memory, gamma=args.gamma, gae_lambda=args.gae_lambda,
+                clip_coef=args.clip_coef, value_coef=args.value_coef, entropy_coef=args.entropy_coef,
+                epochs=args.ppo_epochs, minibatch_size=args.minibatch_size, target_kl=args.target_kl)
+            stats.update(mean_return=aux.get("mean_return", float("nan")),
+                         discounted_return=aux.get("discounted_return", float("nan")))
 
         mean_metric = float(np.mean(metrics))
         best_metric = min(best_metric, mean_metric)
+        save_progress(update, pending=True, diagnostics=(metrics, collisions, realism, aux, stats))
 
         val_note = ""
         if update % val_every == 0 or update == args.updates:
-            val = evaluate_deterministic(args, policy, val_seeds, obb_safety_filter=True)
-            if best_val is None or _validation_score(val) < _validation_score(best_val):
+            val = evaluate_deterministic(args, policy, val_seeds, obb_safety_filter=True,
+                                         label=f"Validation update {update}")
+            val["regressions_vs_utility"] = validation_regressions(val, prior_val)
+            validation_history.append({"update": update, **val})
+            if val["regressions_vs_utility"]:
+                print("Validation regressions vs utility: " + ", ".join(val["regressions_vs_utility"]), flush=True)
+            if _validation_improves(val, best_val, prior_val):
                 best_val = val
                 best_update = update
                 best_state = {k: v.detach().cpu().clone() for k, v in policy.state_dict().items()}
             val_note = (
                 f" | val={val['metric']:8.3f} (prior {prior_val['metric']:.3f})"
+                f" | val_pdms={val.get('closed_loop_score', float('nan')):5.3f}"
                 f" | val_arrival={val['arrival_rate']:5.3f}"
+                f" | val_events={val['collision_events']:5.2f}"
+                f" | val_pair_steps={val['collisions']:5.2f}"
+                f" | val_return={val.get('mean_return', float('nan')):7.2f}"
+                f" | val_discounted={val.get('discounted_return', float('nan')):7.2f}"
                 f" | usage={val['residual_usage']:5.3f}"
                 f" | flip={val['control_flip_rate']:5.3f}"
                 f" | train_flip={aux['control_flip_rate']:5.3f}"
@@ -858,26 +1218,40 @@ def train(args: argparse.Namespace) -> None:
                 realism_note = f" | realism={np.nanmean(realism):5.3f}"
             print(
                 f"Update {update:4d}/{args.updates} | metric={mean_metric:8.3f} | "
-                f"best={best_metric:8.3f} | collisions={np.mean(collisions):5.2f}{realism_note} | "
+                f"best={best_metric:8.3f} | pair_steps={np.mean(collisions):5.2f} | "
+                f"events={aux.get('collision_events', float('nan')):5.2f}{realism_note} | "
+                f"return={aux.get('mean_return', float('nan')):7.2f} | "
                 f"ev={stats['explained_variance']:6.3f} | kl={stats['approx_kl']:6.4f} | "
-                f"ep={stats['epochs_run']:.0f} | entropy={stats['entropy']:6.3f}{val_note}"
+                f"episodes={args.episodes_per_update} | epochs={stats['epochs_run']:.0f} | "
+                f"entropy={stats['entropy']:6.3f}{val_note}"
             )
+        save_progress(update)
 
     if curve_path is not None and curve_rows:
         _persist_curve(curve_path, curve_rows)
         print(f"Wrote learning curve to {curve_path} and {curve_path.with_suffix('.png')}")
 
+    if getattr(args, "skip_test", False):
+        save_progress(args.updates, complete=True)
+        print(f"Development run complete; selected update {best_update} "
+              f"({'utility fallback' if best_update == 0 else 'learned residual'}); "
+              "held-out test was not evaluated.")
+        return
+
+    # Keep the latest optimizer/actor paired in the resumable state.
+    latest_state = copy.deepcopy(policy.state_dict())
     if best_state is not None:
         policy.load_state_dict(best_state)
 
     # Honest report: the test seeds never took part in selection.
-    prior_test = evaluate_deterministic(args, None, test_seeds, obb_safety_filter=True)
-    policy_test = evaluate_deterministic(args, policy, test_seeds, obb_safety_filter=True)
+    prior_test = evaluate_deterministic(args, None, test_seeds, obb_safety_filter=True, label="Prior test")
+    policy_test = evaluate_deterministic(args, policy, test_seeds, obb_safety_filter=True, label="Selected policy test")
     print(
         f"Held-out TEST ({len(test_seeds)} episodes, never used for selection): "
         f"metric={policy_test['metric']:.3f} (prior {prior_test['metric']:.3f}) | "
         f"arrival={policy_test['arrival_rate']:.3f} (prior {prior_test['arrival_rate']:.3f}) | "
-        f"collisions={policy_test['collisions']:.2f} (prior {prior_test['collisions']:.2f}) | "
+        f"pair_steps={policy_test['collisions']:.2f} (prior {prior_test['collisions']:.2f}) | "
+        f"events={policy_test['collision_events']:.2f} (prior {prior_test['collision_events']:.2f}) | "
         f"flip={policy_test['control_flip_rate']:.3f}"
     )
 
@@ -890,62 +1264,9 @@ def train(args: argparse.Namespace) -> None:
         )
 
     if args.save is not None:
-        args.save.parent.mkdir(parents=True, exist_ok=True)
-        scales_blob: dict[str, float]
-        if residual_mode == RESIDUAL_MODE_CANDIDATE:
-            scales_blob = {
-                f"c{i}": float(policy.residual_scales[i])
-                for i in range(int(policy.residual_scales.numel()))
-            }
-        else:
-            scales_blob = {k: float(DEFAULT_RESIDUAL_SCALES[k]) for k in RESIDUAL_PARAM_KEYS}
-        blob = {
-            "protocol_version": 3,
-                "state_dict": policy.state_dict(),
-            "obs_dim": probe_env.obs_dim,
-            "hidden_dim": args.hidden_dim,
-            "residual_scale": policy.residual_scale,
-            "residual_scales": scales_blob,
-            "param_gauge": PARAM_GAUGE,
-            "action_space": DEFAULT_ACTION_SPACE,
-            "residual_mode": residual_mode,
-            "action_dim": int(probe_env.residual_dim),
-            "highway_length": float(probe_env.config.highway_length),
-            "algo": "ppo",
-            "prefer_params": args.prefer_params,
-            "calibration": str(args.calibration) if args.calibration else None,
-            "base_params": dict(probe_env.config.base_params),
-            "train_obb_filter": bool(probe_env.config.sim_config["obb_safety_filter"]),
-            "boundary_safety_filter": bool(probe_env.config.sim_config["boundary_safety_filter"]),
-            "boundary_margin": float(probe_env.config.sim_config["boundary_margin"]),
-            "num_agents": args.num_agents,
-            "max_steps": args.max_steps,
-            "leftover_coef": probe_env.config.leftover_coef,
-            "arrival_bonus": probe_env.config.arrival_bonus,
-            "collision_penalty": float(args.collision_penalty),
-            "behavior_coef": float(args.behavior_coef),
-            "behavior_shaping_coef": float(args.behavior_shaping_coef),
-            "updates": int(args.updates),
-            "selected_update": int(best_update),
-            "val_seeds": [int(s) for s in val_seeds],
-            "val_metric": float(best_val["metric"]) if best_val else float("nan"),
-            "val_collisions": float(best_val["collisions"]) if best_val else float("nan"),
-            "val_arrival_rate": float(best_val["arrival_rate"]) if best_val else float("nan"),
-            "val_control_flip_rate": float(best_val.get("control_flip_rate", 0.0)) if best_val else float("nan"),
-            "prior_val_metric": float(prior_val["metric"]),
-            "prior_val_collisions": float(prior_val["collisions"]),
-            "prior_val_arrival_rate": float(prior_val["arrival_rate"]),
-            "test_seeds": [int(s) for s in test_seeds],
-            "test_metric": float(policy_test["metric"]),
-            "test_arrival_rate": float(policy_test["arrival_rate"]),
-            "test_collisions": float(policy_test["collisions"]),
-            "test_control_flip_rate": float(policy_test.get("control_flip_rate", 0.0)),
-            "prior_test_metric": float(prior_test["metric"]),
-            "prior_test_arrival_rate": float(prior_test["arrival_rate"]),
-            "prior_test_collisions": float(prior_test["collisions"]),
-            "best_collisions": float(best_val["collisions"]) if best_val else float("nan"),
-        }
-        torch.save(blob, args.save)
+        _export_checkpoint(selected_checkpoint(args.updates, policy_test=policy_test, prior_test=prior_test), args.save)
+        policy.load_state_dict(latest_state)
+        save_progress(args.updates, complete=True)
         if best_val is None:
             print(f"Saved PPO residual policy to {args.save}")
         else:
@@ -963,11 +1284,10 @@ def main() -> None:
     parser.add_argument("--episodes-per-update", type=int, default=4)
     parser.add_argument("--num-agents", type=int, default=10)
     parser.add_argument("--max-steps", type=int, default=240)
-    parser.add_argument("--baseline-episodes", type=int, default=5)
     parser.add_argument(
         "--val-episodes",
         type=int,
-        default=8,
+        default=16,
         help="Held-out episodes used for deterministic checkpoint selection",
     )
     parser.add_argument(
@@ -1006,29 +1326,50 @@ def main() -> None:
         choices=(RESIDUAL_MODE_CANDIDATE, RESIDUAL_MODE_PARAM),
         default=DEFAULT_RESIDUAL_MODE,
         help="candidate_logits (default) adds to the discrete utility grid; "
-        "param_delta edits Θ (ablation)",
+        "param_delta edits utility parameters (ablation)",
     )
     parser.add_argument(
         "--train-obb-filter",
         action="store_true",
-        help="Keep the hard OBB filter on during training (default: off so collisions "
-        "remain a reachable learning signal)",
+        default=True,
+        help="Keep the same OBB filter as evaluation during training (default)",
     )
+    parser.add_argument("--no-train-obb-filter", dest="train_obb_filter", action="store_false",
+                        help="Explicit ablation: train without the evaluation OBB filter")
+    parser.add_argument("--candidate-logit-scale", type=float, default=0.5,
+                        help="Bound on candidate residual scores; recorded in checkpoint buffers")
+    parser.add_argument("--policy-action-space", default="auto",
+                        choices=("auto", CATEGORICAL_ACTION_SPACE, SQUASHED_ACTION_SPACE),
+                        help="auto: categorical utility sampling for candidate residuals, Gaussian for parameters")
+    parser.add_argument("--candidate-temperature", type=float, default=0.005,
+                        help="Temperature of softmax(U + residual) during categorical training")
+    parser.add_argument("--validation-seed-start", type=int, default=910_000)
+    parser.add_argument("--test-seed-start", type=int, default=810_000,
+                        help="Fresh block; previous 700000/800000 cases are development cases")
+    parser.add_argument("--skip-test", action="store_true",
+                        help="Development run: validate and save without inspecting held-out test scenarios")
+    parser.add_argument("--resume", type=Path, default=None,
+                        help="Resume a .resume.pt file with its stored settings and random states")
     parser.add_argument(
         "--leftover-coef",
         type=float,
-        default=0.05,
+        default=0.08,
         help="Per-step penalty weight on remaining station / highway length",
     )
     parser.add_argument(
         "--arrival-bonus",
         type=float,
-        default=5.0,
+        default=8.0,
         help="One-shot reward when an agent reaches its destination station",
     )
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--hidden-dim", type=int, default=128)
-    parser.add_argument("--gamma", type=float, default=0.99)
+    parser.add_argument(
+        "--gamma",
+        type=float,
+        default=0.95,
+        help="Discount; 0.99 undervalued late contacts at dt=0.5 in development replays",
+    )
     parser.add_argument("--gae-lambda", type=float, default=0.95)
     parser.add_argument("--clip-coef", type=float, default=0.2)
     parser.add_argument("--value-coef", type=float, default=0.5)
@@ -1048,18 +1389,24 @@ def main() -> None:
         "--prefer-params",
         choices=("robust", "best", "nominal"),
         default="robust",
-        help="Which calibrated parameter set to freeze as Θ_base",
+        help="Which calibrated parameter set to freeze as the utility prior",
     )
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("RL/checkpoints/v3/residual_policy.pt"),
+        default=Path("RL/checkpoints/revision5/residual_policy.pt"),
     )
     parser.add_argument(
         "--collision-penalty",
         type=float,
-        default=8.0,
-        help="Per-step reward penalty for each agent involved in an OBB collision",
+        default=0.0,
+        help="Optional per-step duration penalty on first contact (CaRL default is 0)",
+    )
+    parser.add_argument(
+        "--collision-event-penalty",
+        type=float,
+        default=1.0,
+        help="Terminal contact cost charged once when a colliding pair first appears",
     )
     parser.add_argument(
         "--dense-spawn",
@@ -1085,6 +1432,14 @@ def main() -> None:
         help="Print every N updates (0 = auto: min(10, updates/10))",
     )
     args = parser.parse_args()
+    if args.resume is not None:
+        import sys
+        if any(arg.startswith("--") and arg.split("=")[0] != "--resume" for arg in sys.argv[1:]):
+            parser.error("--resume restores the saved settings; pass it without other training options")
+        resume_path = args.resume
+        saved = torch.load(resume_path, map_location="cpu", weights_only=False)
+        args = argparse.Namespace(**saved["args"])
+        args.resume = resume_path
     if args.calibration is not None and not args.calibration.exists():
         print(f"Warning: calibration file missing ({args.calibration}); using DEFAULT_BASE_PARAMS")
         args.calibration = None

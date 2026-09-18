@@ -31,8 +31,19 @@ STRESS_ABLATION_MODELS: list[str] = [
 # Paired comparisons reported against the full method.
 ABLATION_REFERENCE = "residual_marl"
 
+# Gate vs residual-learning isolation (matched discrete grid + OBB filter).
+GATE_ABLATION_MODELS: list[str] = [
+    "utility_pt",  # calibrated discrete utility, no residual
+    "residual_no_gate",  # trained residual, always execute residual argmax
+    "residual_marl",  # trained residual + PDM-Closed accept-if-better
+    "residual_random_gate",  # untrained residual + the same gate
+    "direct_discrete_rl",  # matched discrete PPO, no utility prior
+]
+
 KEY_PAIRED_COMPARISONS: list[tuple[str, str]] = [
     ("residual_marl", "utility_pt"),
+    ("residual_marl", "residual_no_gate"),
+    ("residual_marl", "residual_random_gate"),
     ("residual_marl", "residual_param"),
     ("residual_marl", "utility_nominal"),
     ("residual_marl", "residual_nominal"),

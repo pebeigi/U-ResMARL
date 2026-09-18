@@ -25,7 +25,65 @@ from utility_model import (
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
 
-DEFAULT_CHECKPOINT = Path("RL/checkpoints/v3/residual_policy.pt")
+DEFAULT_CHECKPOINT = Path("RL/checkpoints/revision5/residual_policy.pt")
+
+
+def build_random_residual_policy(
+    obs_dim: int,
+    *,
+    seed: int = 0,
+    highway_length: float = 500.0,
+    template: Path | None = None,
+) -> Any:
+    """Untrained residual with the paper architecture; actor head is not zeroed.
+
+    ``TorchResidualPolicy`` zeroes the last layer so a fresh network reproduces
+    the utility argmax. This control redraws every actor Linear so the gate is
+    tested against unstructured residual noise rather than the prior itself.
+    """
+    import torch
+    from torch import nn
+
+    from RL.train_ppo import (
+        CANDIDATE_LOGIT_SCALE,
+        CATEGORICAL_ACTION_SPACE,
+        TorchResidualPolicy,
+        action_space_from_blob,
+        residual_mode_from_blob,
+    )
+
+    hidden_dim = 128
+    action_dim = 63
+    action_space = CATEGORICAL_ACTION_SPACE
+    residual_mode = "candidate_logits"
+    candidate_logit_scale = CANDIDATE_LOGIT_SCALE
+    if template is not None and Path(template).exists():
+        blob = torch.load(template, map_location="cpu")
+        obs_dim = int(blob.get("obs_dim", obs_dim))
+        hidden_dim = int(blob.get("hidden_dim", hidden_dim))
+        action_dim = int(blob.get("action_dim", action_dim) or action_dim)
+        action_space = action_space_from_blob(blob)
+        residual_mode = residual_mode_from_blob(blob)
+        candidate_logit_scale = float(blob.get("candidate_logit_scale", candidate_logit_scale))
+        highway_length = float(blob.get("highway_length", highway_length))
+    torch.manual_seed(int(seed))
+    policy = TorchResidualPolicy(
+        obs_dim=int(obs_dim),
+        hidden_dim=hidden_dim,
+        highway_length=float(highway_length),
+        action_space=action_space,
+        residual_mode=residual_mode,
+        action_dim=action_dim,
+        candidate_logit_scale=candidate_logit_scale,
+    )
+    for module in policy.actor.modules():
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                bound = 1.0 / max(1, int(module.out_features)) ** 0.5
+                nn.init.uniform_(module.bias, -bound, bound)
+    policy.eval()
+    return policy
 
 
 def load_residual_policy(checkpoint: Path, obs_dim: int, *, allow_legacy: bool = False) -> Any:
@@ -71,6 +129,8 @@ def load_residual_policy(checkpoint: Path, obs_dim: int, *, allow_legacy: bool =
             f"missing={stale}, unexpected={list(unexpected)}"
         )
     policy.training_base_params = blob.get("base_params")
+    policy.selection_status = blob.get("selection_status", "unreported")
+    policy.training_revision = blob.get("training_revision", 0)
     policy.eval()
     return policy
 
@@ -86,6 +146,9 @@ class ResidualMARLController(BaseController):
         explore_std: float = 0.0,
         freeze_keys: tuple[str, ...] | list[str] | None = None,
         name: str = "residual_marl",
+        accept_if_better: bool = True,
+        random_init: bool = False,
+        random_seed: int = 0,
     ):
         self.base_params = load_base_params(calibration, prefer=prefer)
         self.checkpoint = Path(checkpoint) if checkpoint is not None else None
@@ -93,16 +156,40 @@ class ResidualMARLController(BaseController):
         self.freeze_keys = tuple(freeze_keys or ())
         self.policy = None
         self.name = name
+        self.accept_if_better = bool(accept_if_better)
+        self.random_init = bool(random_init)
+        self.random_seed = int(random_seed)
         self._warned = False
 
     def reset(self, scenario: "Scenario") -> None:
-        if self.policy is not None or self.checkpoint is None:
+        if self.policy is not None:
+            return
+        from Baselines.dynamics import observation_dim
+
+        obs_dim = observation_dim(scenario)
+        if self.random_init:
+            template = self.checkpoint
+            if template is None:
+                seed_path = DEFAULT_CHECKPOINT.with_name(
+                    f"{DEFAULT_CHECKPOINT.stem}_seed{self.random_seed}{DEFAULT_CHECKPOINT.suffix}"
+                )
+                if seed_path.exists():
+                    template = seed_path
+                elif DEFAULT_CHECKPOINT.exists():
+                    template = DEFAULT_CHECKPOINT
+            highway = float(getattr(getattr(scenario, "corridor", None), "length", 500.0) or 500.0)
+            self.policy = build_random_residual_policy(
+                obs_dim,
+                seed=self.random_seed,
+                highway_length=highway,
+                template=template,
+            )
+            return
+        if self.checkpoint is None:
             return
         if not self.checkpoint.exists():
             raise FileNotFoundError(f"{self.name}: missing {self.checkpoint}; train this model before evaluation")
-        from Baselines.dynamics import observation_dim
-
-        self.policy = load_residual_policy(self.checkpoint, observation_dim(scenario))
+        self.policy = load_residual_policy(self.checkpoint, obs_dim)
         if self.freeze_keys and self.policy.residual_mode != "param_delta":
             raise ValueError("Parameter ablations require a param_delta checkpoint; candidate_logits masks would be no-ops")
         trained_base = self.policy.training_base_params
@@ -146,9 +233,10 @@ class ResidualMARLController(BaseController):
                     i, agent, agents, self.base_params, scenario.sim_config
                 )
             elif mode == "candidate_logits":
+                from RL.closed_loop_score import residual_proposal_improves
                 obs = observation(agents, i, scenario)
                 residual, _ = self.policy.act(np.asarray(obs, dtype=np.float32), self.explore_std)
-                chosen, _, _ = select_candidate_with_logit_residual(
+                chosen, idx, prior_idx = select_candidate_with_logit_residual(
                     i,
                     agent,
                     agents,
@@ -156,6 +244,12 @@ class ResidualMARLController(BaseController):
                     scenario.sim_config,
                     logit_residual=np.asarray(residual, dtype=float),
                 )
+                if self.accept_if_better and idx != prior_idx:
+                    prior, _, _ = select_candidate_with_logit_residual(
+                        i, agent, agents, self.base_params, scenario.sim_config, None)
+                    if not residual_proposal_improves(
+                        agent, chosen, prior, agents, i, scenario.sim_config, scenario.corridor):
+                        chosen = prior
             else:
                 obs = observation(agents, i, scenario)
                 delta, _ = self.policy.act(np.asarray(obs, dtype=np.float32), self.explore_std)

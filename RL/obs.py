@@ -104,9 +104,25 @@ def local_observation(
     return obs
 
 
-def contact_safety_reward(distance: float, vehicle_length: float = 4.5) -> float:
-    """Reward term for one neighbor: strong near/inside the footprint, soft at range."""
-    gap = float(distance) - float(vehicle_length)
+def footprint_surface_gap(ego, other, length=4.5, width=1.8):
+    """Signed separating-axis clearance; positive is a conservative surface gap.
+
+    Unlike subtracting vehicle length from centre distance, this distinguishes
+    safe parallel traffic from actual footprint overlap. Negative values mean
+    overlap; diagonal positive gaps can underestimate Euclidean clearance.
+    """
+    headings = np.array([ego.heading, other.heading])
+    along = np.stack((np.cos(headings), np.sin(headings)), axis=1)
+    across = np.stack((-np.sin(headings), np.cos(headings)), axis=1)
+    axes = np.concatenate((along, across), axis=0)
+    extent = .5 * length * np.abs(axes @ along.T).sum(axis=1)
+    extent += .5 * width * np.abs(axes @ across.T).sum(axis=1)
+    return float(np.max(np.abs(axes @ (other.pos - ego.pos)) - extent))
+
+
+def contact_safety_reward(surface_gap: float) -> float:
+    """RL reward from footprint clearance, not centre distance."""
+    gap = float(surface_gap)
     if gap <= 0.0:
         return -16.0 * (1.0 - gap)
     return -float(np.exp(-gap / 2.0))

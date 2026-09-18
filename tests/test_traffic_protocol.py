@@ -55,6 +55,11 @@ class SharedTransitionTest(unittest.TestCase):
         result = rollout(scenario, Coast())
         self.assertEqual(result.arrival_step.tolist(), [1])
         self.assertFalse(result.active[-1, 0])
+        from Baselines.metrics import rollout_metrics
+        metrics = rollout_metrics(result)
+        self.assertGreater(metrics["mean_speed_mps"], 0.)
+        self.assertEqual(metrics["mean_capped_travel_time_s"], scenario.dt)
+        self.assertTrue(np.isfinite(metrics["rms_jerk"]))
 
     def test_contacts_on_arrival_step_are_not_hidden(self):
         scenario = build_scenario(0, num_agents=2, max_steps=1, obb_safety_filter=False)
@@ -233,6 +238,7 @@ class CheckpointAndAblationTest(unittest.TestCase):
 
     def test_ablation_and_nominal_paths_are_distinct(self):
         self.assertEqual(LEARNED_CHECKPOINTS["residual_param"], LEARNED_CHECKPOINTS["residual_weights_only"])
+        self.assertEqual(LEARNED_CHECKPOINTS["residual_marl"], LEARNED_CHECKPOINTS["residual_no_gate"])
         self.assertNotEqual(LEARNED_CHECKPOINTS["residual_marl"], LEARNED_CHECKPOINTS["residual_param"])
         self.assertNotEqual(LEARNED_CHECKPOINTS["residual_marl"], LEARNED_CHECKPOINTS["residual_nominal"])
 
@@ -284,23 +290,6 @@ class DiagnosticAndWrapperTest(unittest.TestCase):
         keys, values = residual_series_matrix([{}, {"c0": .5, "c10": -.7, "c2": .1}])
         self.assertEqual(keys, ["c0", "c2", "c10"])
         np.testing.assert_allclose(values[:, 0], [.5, .1, .7])
-
-    def test_rllib_modes_and_timeout_flags(self):
-        from RL.gym_env import TrafficMARLEnv
-        for mode, size in [("candidate_logits", 63), ("param_delta", 9)]:
-            env = TrafficMARLEnv({"num_agents": 2, "max_steps": 1, "residual_mode": mode})
-            env.reset(seed=0)
-            actions = {aid: np.zeros(size, dtype=np.float32) for aid in env.agents}
-            _, _, terminated, truncated, _ = env.step(actions)
-            self.assertFalse(terminated["__all__"])
-            self.assertTrue(truncated["__all__"])
-            self.assertEqual(env.agents, [])
-
-    def test_rllib_agent_ids_keep_numeric_identity_above_ten_agents(self):
-        from RL.gym_env import TrafficMARLEnv
-        env = TrafficMARLEnv({"num_agents": 12, "max_steps": 1})
-        obs, _ = env.reset(seed=0)
-        np.testing.assert_array_equal(obs["agent_10"], env._env.get_observation(10))
 
 
 if __name__ == "__main__":

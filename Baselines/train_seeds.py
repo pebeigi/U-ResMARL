@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument("--model", choices=sorted(TRAINERS), default="residual_marl")
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
     parser.add_argument("--jobs", type=int, default=1, help="Concurrent training runs")
-    parser.add_argument("--log-dir", type=Path, default=Path("RL/logs/v3/seeds"))
+    parser.add_argument("--log-dir", type=Path, default=Path("RL/logs/revision5/seeds"))
     parser.add_argument(
         "--overwrite",
         action="store_true",

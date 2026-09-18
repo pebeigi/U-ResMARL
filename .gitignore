@@ -74,6 +74,7 @@ Baselines/results/
 
 # Training logs
 RL/logs/
+.retired_rl_outputs/
 
 # Ray / RLlib local caches
 ray_results/

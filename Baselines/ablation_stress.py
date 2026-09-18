@@ -10,12 +10,21 @@ Minimum ICLR/CoRL ablation package (see ``Baselines.ablation_models``):
   * residual on nominal prior (calibration ablation)
   * full vs. no-lookahead OBB conflict horizon (1.5 s / 4 substeps vs. 1 step)
 
+Gate vs residual-learning isolation (``--mode gate``):
+
+  * utility prior
+  * trained residual without the accept-if-better gate
+  * trained residual with the gate (``residual_marl``)
+  * randomly initialized residual with the same gate
+  * matched direct discrete RL
+
 Default evaluation uses 30 matched scenarios and 3 RL training seeds with paired
 bootstrap confidence intervals.
 
     python -m Baselines.ablation_stress
     python -m Baselines.ablation_stress --mode ablation --lookahead both
     python -m Baselines.ablation_stress --mode stress
+    python -m Baselines.ablation_stress --mode gate --scenarios 20 --lookahead full
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from Baselines.ablation_models import (
     DEFAULT_ABLATION_SCENARIOS,
     DEFAULT_STRESS_SCENARIOS,
     DEFAULT_TRAIN_SEEDS,
+    GATE_ABLATION_MODELS,
     KEY_PAIRED_COMPARISONS,
     PAPER_ABLATION_MODELS,
     STRESS_ABLATION_MODELS,
@@ -45,7 +55,7 @@ from Baselines.scenario import Scenario, build_scenario
 from Baselines.stats import comparison_frame, summary_frame
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/v2")
+DEFAULT_OUTPUT = Path("Baselines/results/revision5")
 
 STRESS_SPAWN = {
     "spawn_s_range": (20.0, 80.0),
@@ -54,11 +64,12 @@ STRESS_SPAWN = {
 }
 
 _COLLPEN_CHECKPOINTS = {
-    "residual_collpen": Path("RL/checkpoints/v3/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/v3/residual_collpen_dense_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/revision5/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/revision5/residual_collpen_dense_policy.pt"),
 }
 
 STATS_METRICS = (
+    "closed_loop_score",
     "collision_events",
     "offroad_rate",
     "min_ttc_s",
@@ -139,6 +150,7 @@ def _run_suite(
                 calibration=args.calibration,
                 checkpoint_dir=args.checkpoint_dir,
                 checkpoint_override=checkpoint if train_seed >= 0 else None,
+                train_seed=train_seed,
             )
             controller = build_controller(model, **kwargs)
             for scenario in scenarios:
@@ -183,6 +195,7 @@ def _run_suite(
     mean_cols = [
         c
         for c in (
+            "mean_closed_loop_score",
             "mean_collision_events",
             "mean_offroad_rate",
             "mean_arrival_rate",
@@ -235,6 +248,8 @@ def _write_paired_comparisons(
 
 
 def _resolve_model_list(args: argparse.Namespace, dense: bool) -> list[str]:
+    if args.mode == "gate" and list(args.models) == PAPER_ABLATION_MODELS:
+        return list(GATE_ABLATION_MODELS)
     if list(args.models) != PAPER_ABLATION_MODELS:
         return _available_models(list(args.models))
     return _available_models(STRESS_ABLATION_MODELS if dense else PAPER_ABLATION_MODELS)
@@ -250,7 +265,7 @@ def _lookahead_suites(args: argparse.Namespace) -> list[tuple[str, str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Paper ablations and dense stress tests")
-    parser.add_argument("--mode", choices=("ablation", "stress", "both"), default="both")
+    parser.add_argument("--mode", choices=("ablation", "stress", "both", "gate"), default="both")
     parser.add_argument("--models", nargs="+", default=PAPER_ABLATION_MODELS)
     parser.add_argument("--scenarios", type=int, default=DEFAULT_ABLATION_SCENARIOS)
     parser.add_argument(
@@ -295,7 +310,15 @@ def main() -> None:
 
     summaries: dict[str, pd.DataFrame] = {}
 
-    if args.mode in {"ablation", "both"}:
+    if args.mode == "gate":
+        models = _resolve_model_list(args, dense=False)
+        if not models:
+            raise SystemExit("No gate-ablation models available to evaluate.")
+        scenarios = _build_scenarios(args, dense=False, conflict_lookahead="full")
+        summaries["gate"] = _run_suite(
+            "gate", scenarios, models, args, args.output_dir / "gate"
+        )
+    elif args.mode in {"ablation", "both"}:
         models = _resolve_model_list(args, dense=False)
         if not models:
             raise SystemExit("No ablation models available to evaluate.")

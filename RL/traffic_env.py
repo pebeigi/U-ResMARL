@@ -14,7 +14,6 @@ from RL.corridor import (
     DEFAULT_RUN_ID,
     DEFAULT_VEHICLE_LENGTH,
     DEFAULT_VEHICLE_WIDTH,
-    boundary_reward,
     boxes_overlap,
     corridor_sim_defaults,
     load_corridor,
@@ -22,15 +21,21 @@ from RL.corridor import (
 from RL.behavior_reference import FEATURES as BEHAVIOR_FEATURES
 from RL.behavior_reference import load_behavior_reference
 from RL.obs import local_observation, observation_dim
-from RL.transition import advance_agents
+from RL.transition import advance_agents, DEFAULT_REWARD_WEIGHTS, DRIVING_REWARD_REVISION
 from utility_model import (
     DEFAULT_BASE_PARAMS,
     DEFAULT_SIM_CONFIG,
     TrafficAgent,
-    kinematic_bicycle_rollout,
     sanitize_control_command,
     select_candidate_with_logit_residual,
 )
+
+
+SPAWN_PROTOCOL_VERSION = 3
+
+
+class SpawnPackingError(ValueError):
+    """The requested spawn layout could not be packed without overlaps."""
 
 
 @dataclass
@@ -50,10 +55,11 @@ class EnvConfig:
     vehicle_length: float = DEFAULT_VEHICLE_LENGTH
     vehicle_width: float = DEFAULT_VEHICLE_WIDTH
     reward_weights: dict[str, float] | None = None
-    # Explicit OBB collision penalty added to the per-step reward of every agent
-    # involved in a collision this step. Soft proximity (r_safety) alone is too
-    # weak for residual learning to care about vehicle-scale overlaps.
+    # Explicit OBB collision penalties. Soft proximity alone is too weak for
+    # residual learning to care about vehicle-scale overlaps. Duration is off
+    # by default (CaRL); event penalty is the terminal contact cost.
     collision_penalty: float = 0.0
+    collision_event_penalty: float = 1.0
     # Behavioral data terms. ``behavior_coef`` weights a per-agent penalty for
     # leaving the observed band of each marginal. ``behavior_shaping_coef``
     # weights potential-based shaping on the episode's distance to the measured
@@ -65,23 +71,22 @@ class EnvConfig:
     behavior_csv: str | None = None
     sim_config: dict[str, Any] | None = None
     base_params: dict[str, float] | None = None
-    # ``candidate_logits``: residual adds to discrete utilities (default, continuous credit).
+    # ``candidate_logits``: residual adds to discrete utilities before argmax.
     # ``param_delta``: residual edits Θ (legacy / ablation).
     residual_mode: str = "candidate_logits"
     # Terms that align the dense reward with leftover-distance / arrival metrics.
-    leftover_coef: float = 0.05
-    arrival_bonus: float = 5.0
-    # When set, overrides ``sim_config["obb_safety_filter"]`` (train default: False).
+    leftover_coef: float = 0.08
+    arrival_bonus: float = 8.0
+    # When set, overrides ``sim_config["obb_safety_filter"]``.
     obb_safety_filter: bool | None = None
+    # PDM-Closed: at inference, execute a residual candidate only if its local
+    # closed-loop score strictly beats the frozen utility proposal. Training
+    # keeps sampled actions so PPO stays on-policy.
+    accept_residual_if_better: bool = False
 
     def __post_init__(self) -> None:
         if self.reward_weights is None:
-            self.reward_weights = {
-                "progress": 1.0,
-                "safety": 0.5,
-                "smooth": 0.2,
-                "traj": 0.0,
-            }
+            self.reward_weights = dict(DEFAULT_REWARD_WEIGHTS)
         corridor = load_corridor(self.run_id, self.lane_kf)
         self.highway_length = float(corridor.length)
         if self.sim_config is None:
@@ -127,6 +132,12 @@ class EnvConfig:
             self.sim_config["obb_safety_filter"] = bool(self.obb_safety_filter)
         self.sim_config.setdefault("boundary_safety_filter", True)
         self.sim_config.setdefault("boundary_margin", 0.1)
+        self.sim_config["spawn_protocol_version"] = SPAWN_PROTOCOL_VERSION
+        self.sim_config["collision_filter_revision"] = 2
+        self.sim_config["driving_reward_revision"] = DRIVING_REWARD_REVISION
+        self.sim_config["leftover_coef"] = float(self.leftover_coef)
+        self.sim_config["arrival_bonus"] = float(self.arrival_bonus)
+        self.sim_config["collision_event_penalty"] = float(self.collision_event_penalty)
         if self.base_params is None:
             self.base_params = dict(DEFAULT_BASE_PARAMS)
         if self.residual_mode not in ("candidate_logits", "param_delta"):
@@ -141,8 +152,12 @@ class MultiAgentTrafficEnv:
         self.corridor = load_corridor(self.config.run_id, self.config.lane_kf)
         self.rng = np.random.default_rng(seed)
         self.agents: list[TrafficAgent] = []
+        self._candidate_cache = {}
         self.step_count = 0
         self.collision_count = 0
+        self.collision_events = 0
+        self._collision_pairs: set[tuple[int, int]] = set()
+        self.collided_agents: set[int] = set()
         self.behavior_reference = None
         if self.config.behavior_coef > 0.0 or self.config.behavior_shaping_coef > 0.0:
             self.behavior_reference = load_behavior_reference(
@@ -167,8 +182,12 @@ class MultiAgentTrafficEnv:
         return len(RESIDUAL_PARAM_KEYS)
 
     def reset(self) -> list[np.ndarray]:
+        self._candidate_cache = {}
         self.step_count = 0
         self.collision_count = 0
+        self.collision_events = 0
+        self._collision_pairs = set()
+        self.collided_agents = set()
         self._dest_s = []
         self._behavior_samples = {k: [] for k in BEHAVIOR_FEATURES}
         self._behavior_potential = None
@@ -176,6 +195,29 @@ class MultiAgentTrafficEnv:
         return [self.get_observation(i) for i in range(len(self.agents))]
 
     def _spawn_agents(self) -> list[TrafficAgent]:
+        # Random sequential packing can get stuck even when a valid layout fits.
+        # Restart the layout instead of silently dropping spacing constraints.
+        for attempt in range(64):
+            self._spawn_stations = None
+            if attempt >= 8 and self.config.num_agents > 1:
+                lo, hi = self.config.spawn_s_range
+                hi = min(hi, max(lo + 1.0, self.corridor.length * .35))
+                # A structured proposal can fit near-capacity single-file
+                # layouts that random sequential placement rarely discovers.
+                # All geometric and spacing checks below still apply.
+                if (hi - lo) / (self.config.num_agents - 1) > self.config.min_initial_spacing:
+                    stations = np.linspace(lo, hi, self.config.num_agents)
+                    self._spawn_stations = self.rng.permutation(stations)
+            try:
+                return self._spawn_agents_once()
+            except SpawnPackingError:
+                continue
+            finally:
+                self._spawn_stations = None
+        raise SpawnPackingError("Unable to pack non-overlapping vehicles in the spawn window")
+
+    def _spawn_agents_once(self) -> list[TrafficAgent]:
+        from RL.spawn_safety import has_straight_braking_backup
         agents: list[TrafficAgent] = []
         n = self.config.num_agents
         base_v = self.config.base_desired_speed
@@ -212,6 +254,23 @@ class MultiAgentTrafficEnv:
                 agent.heading_angle = float(np.arctan2(tangent[1], tangent[0]))
                 agent.vel = speed * tangent
                 agent._sync_heading_vector()
+            if any(boxes_overlap(agent.pos, agent.heading, other.pos, other.heading,
+                                 self.config.sim_config.get("vehicle_length", self.config.vehicle_length),
+                                 self.config.sim_config.get("vehicle_width", self.config.vehicle_width))
+                   for other in agents[:-1]):
+                raise SpawnPackingError("Heading noise caused an initial vehicle overlap")
+            # Rejection-sample velocity as well as position. Otherwise a dense
+            # layout may look valid while its independently sampled closing
+            # speeds make contact unavoidable under the available backup.
+            for velocity_attempt in range(32):
+                if has_straight_braking_backup(agents, self.config.sim_config):
+                    break
+                speed = max(1., self.rng.normal(base_v, 1.2))
+                agent.vel = speed * np.array([np.cos(agent.heading), np.sin(agent.heading)])
+            else:
+                raise SpawnPackingError("Unable to sample compatible initial velocities")
+        if not has_straight_braking_backup(agents, self.config.sim_config, self.corridor):
+            raise SpawnPackingError("Spawn has no collision-free straight-braking backup")
         return agents
 
     def _sample_start_pose(
@@ -222,7 +281,9 @@ class MultiAgentTrafficEnv:
         s_hi = min(s_hi, max(s_lo + 1.0, self.corridor.length * 0.35))
         margin = 0.5 * float(self.config.sim_config.get("vehicle_width", self.config.vehicle_width))
         for _ in range(300):
-            s = float(self.rng.uniform(s_lo, s_hi))
+            stations = getattr(self, "_spawn_stations", None)
+            s = (float(self.rng.uniform(s_lo, s_hi)) if stations is None
+                 else float(stations[len(existing_agents)]))
             # Probe local half-width
             mid, tangent = self.corridor.xy_from_frenet(s, 0.0)
             c_lo, c_hi, _ = self.corridor.clearances(mid)
@@ -234,21 +295,15 @@ class MultiAgentTrafficEnv:
                 continue
             from RL.boundary import footprint_clearance
             if footprint_clearance(self.corridor, pos, float(np.arctan2(tangent[1], tangent[0])),
-                                   self.config.vehicle_length, self.config.vehicle_width) < self.config.sim_config["boundary_margin"]:
+                                   self.config.sim_config.get("vehicle_length", self.config.vehicle_length),
+                                   self.config.sim_config.get("vehicle_width", self.config.vehicle_width)) < self.config.sim_config["boundary_margin"]:
                 continue
             if all(
                 np.linalg.norm(pos - agent.pos) >= self.config.min_initial_spacing
                 for agent in existing_agents
             ):
                 return pos, tangent, s
-        # Spacing remains best-effort as in the historical sampler, but the
-        # fallback may never violate footprint containment.
-        for _ in range(300):
-            pos, tangent = self.corridor.xy_from_frenet(float(self.rng.uniform(s_lo, s_hi)), 0.0)
-            if footprint_clearance(self.corridor, pos, float(np.arctan2(tangent[1], tangent[0])),
-                                   self.config.vehicle_length, self.config.vehicle_width) >= self.config.sim_config["boundary_margin"]:
-                return pos, tangent, float(self.corridor.project(pos)[0])
-        raise ValueError("Unable to spawn a road-contained vehicle")
+        raise SpawnPackingError("No road-contained start pose with the requested spacing")
 
     def get_neighbors(self, agent_idx: int) -> list[int]:
         ego = self.agents[agent_idx]
@@ -290,6 +345,23 @@ class MultiAgentTrafficEnv:
         )
         return max(float(dest_s) - float(s), 0.0)
 
+    def _keep_residual_candidate(self, agent_idx, residual_candidate, prior_candidate) -> bool:
+        if not self.config.accept_residual_if_better:
+            return True
+        from RL.closed_loop_score import residual_proposal_improves
+        return residual_proposal_improves(
+            self.agents[agent_idx], residual_candidate, prior_candidate,
+            self.agents, agent_idx, self.config.sim_config, self.corridor)
+
+    def candidate_context(self, agent_idx):
+        from RL.candidate_policy import candidate_context
+        if self.config.residual_mode != "candidate_logits":
+            raise ValueError("Discrete candidate context requires candidate_logits mode")
+        if agent_idx not in self._candidate_cache:
+            self._candidate_cache[agent_idx] = candidate_context(
+                agent_idx, self.agents, self.config.base_params, self.config.sim_config)
+        return self._candidate_cache[agent_idx]
+
     def step(
         self,
         residual_actions: list[Any] | None = None,
@@ -300,12 +372,30 @@ class MultiAgentTrafficEnv:
         if len(residual_actions) != len(self.agents):
             raise ValueError("Expected one residual action per agent")
         controls = []
+        prior_controls = []
+        from RL.candidate_policy import CandidateIndex
         flipped = considered = 0
         for i, agent in enumerate(self.agents):
             if agent.reached_destination:
                 controls.append((0.0, 0.0))
+                prior_controls.append((0.0, 0.0))
                 continue
             action = residual_actions[i]
+            if isinstance(action, CandidateIndex):
+                context = self.candidate_context(i)
+                idx = action.index
+                if idx < 0 or idx >= len(context.mask) or not context.mask[idx]:
+                    raise ValueError("Sampled candidate is not eligible in the current state")
+                prior = context.candidates[context.prior_index]
+                chosen = context.candidates[idx]
+                if idx != context.prior_index and not self._keep_residual_candidate(i, chosen, prior):
+                    idx = context.prior_index
+                    chosen = prior
+                considered += 1
+                flipped += int(idx != context.prior_index)
+                controls.append((float(chosen["accel_longitudinal"]), float(chosen["steering_angle"])))
+                prior_controls.append((float(prior["accel_longitudinal"]), float(prior["steering_angle"])))
+                continue
             residual = None
             params = self.config.base_params
             if self.config.residual_mode == "candidate_logits":
@@ -317,19 +407,46 @@ class MultiAgentTrafficEnv:
                 params = apply_residual(params, action)
             chosen, idx, prior_idx = select_candidate_with_logit_residual(
                 i, agent, self.agents, params, self.config.sim_config, residual)
+            if self.config.residual_mode == "candidate_logits":
+                context = self.candidate_context(i)
+                prior = context.candidates[context.prior_index]
+                if idx != prior_idx and not self._keep_residual_candidate(i, chosen, prior):
+                    idx = prior_idx
+                    chosen = prior
+                prior_controls.append((float(prior["accel_longitudinal"]), float(prior["steering_angle"])))
+            else:
+                prior, _, _ = select_candidate_with_logit_residual(
+                    i, agent, self.agents, self.config.base_params, self.config.sim_config, None)
+                if idx != prior_idx and not self._keep_residual_candidate(i, chosen, prior):
+                    idx = prior_idx
+                    chosen = prior
+                prior_controls.append((float(prior["accel_longitudinal"]), float(prior["steering_angle"])))
             considered += 1
             flipped += int(idx != prior_idx)
             controls.append((float(chosen["accel_longitudinal"]), float(chosen["steering_angle"])))
+
+        active_before = [not a.reached_destination for a in self.agents]
+        prior_executed = [sanitize_control_command(i, a, self.agents, c, self.config.sim_config)
+                          if active_before[i] else (0., 0.)
+                          for i, (a, c) in enumerate(zip(self.agents, prior_controls))]
 
         transition = advance_agents(
             self.agents, controls, self.corridor, self.config.sim_config, self._dest_s,
             reward_weights=self.config.reward_weights, leftover_coef=self.config.leftover_coef,
             arrival_bonus=self.config.arrival_bonus, collision_penalty=self.config.collision_penalty,
+            collision_event_penalty=self.config.collision_event_penalty,
+            previous_collision_pairs=self._collision_pairs,
         )
+        self._candidate_cache = {}
+        executed_flips = sum(active_before[i] and not np.allclose(c, prior_executed[i], rtol=0., atol=1e-8)
+                             for i, c in enumerate(transition.controls))
         rewards = transition.rewards
         selected_controls = [{"accel": a, "steering": d} for a, d in transition.controls]
         hit = transition.colliding_agents
         self.collision_count += len(transition.collision_pairs)
+        self.collision_events += len(transition.collision_pairs - self._collision_pairs)
+        self._collision_pairs = transition.collision_pairs
+        self.collided_agents |= set(transition.colliding_agents)
         self.step_count += 1
         if self.behavior_reference is not None:
             for i, move in enumerate(transition.candidates):
@@ -363,6 +480,7 @@ class MultiAgentTrafficEnv:
 
         info = {
             "collision_count": self.collision_count,
+            "collision_events": self.collision_events,
             "steps": self.step_count,
             "destinations_reached": sum(a.reached_destination for a in self.agents),
             "selected_controls": selected_controls,
@@ -371,9 +489,10 @@ class MultiAgentTrafficEnv:
             "colliding_agents": sorted(hit),
             "realism_distance": realism_distance,
             "truncated": bool(truncated and not all_arrived),
-            "control_flips": int(flipped),
+            "candidate_flips": int(flipped),
+            "control_flips": int(executed_flips),
             "control_decisions": int(considered),
-            "control_flip_rate": float(flipped / considered) if considered else 0.0,
+            "control_flip_rate": float(executed_flips / considered) if considered else 0.0,
         }
         return observations, rewards, done, info
 
@@ -383,55 +502,6 @@ class MultiAgentTrafficEnv:
             return float("nan")
         samples = {k: np.asarray(v, dtype=float) for k, v in self._behavior_samples.items()}
         return self.behavior_reference.distribution_distance(samples)
-
-    def _update_destination_flag(self, agent_idx: int) -> None:
-        """
-        Mark arrival by corridor progress: once along-track s reaches dest_s,
-        stop the agent. Euclidean 1 m checks fail when cars are laterally offset
-        from the centerline destination star.
-        """
-        agent = self.agents[agent_idx]
-        if agent.reached_destination:
-            agent.vel[:] = 0.0
-            return
-        s, _, _, _, _ = self.corridor.project(agent.pos)
-        dest_s = self._dest_s[agent_idx] if agent_idx < len(getattr(self, "_dest_s", [])) else None
-        if dest_s is None:
-            dest_s = float(self.corridor.project(agent.dest)[0])
-        tol = float(self.config.sim_config.get("destination_threshold", 1.0))
-        # Arrive when we reach/pass the destination station (with small tolerance).
-        if s >= dest_s - tol:
-            agent.reached_destination = True
-            agent.vel[:] = 0.0
-            agent.prev_control = {"accel": 0.0, "steering": 0.0}
-
-    def _check_collisions(self) -> set[int]:
-        """Count pairwise OBB overlaps; return the set of agents involved this step."""
-        sim = self.config.sim_config
-        length = float(sim.get("vehicle_length", self.config.vehicle_length))
-        width = float(sim.get("vehicle_width", self.config.vehicle_width))
-        use_obb = bool(sim.get("use_obb_collisions", True))
-        threshold = float(sim.get("collision_threshold", 1.5))
-        colliding: set[int] = set()
-        for i in range(len(self.agents)):
-            for j in range(i + 1, len(self.agents)):
-                if self.agents[i].reached_destination or self.agents[j].reached_destination:
-                    continue
-                if use_obb:
-                    hit = boxes_overlap(
-                        self.agents[i].pos,
-                        self.agents[i].heading,
-                        self.agents[j].pos,
-                        self.agents[j].heading,
-                        length=length,
-                        width=width,
-                    )
-                else:
-                    hit = np.linalg.norm(self.agents[i].pos - self.agents[j].pos) < threshold
-                if hit:
-                    self.collision_count += 1
-                    colliding.update((i, j))
-        return colliding
 
     def rollout_metric(self) -> float:
         total_dist = sum(

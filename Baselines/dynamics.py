@@ -95,7 +95,7 @@ def compute_reward(
     """Shared pre-transition reward; terminal bonuses are added by advance_agents."""
     return driving_reward(agents, idx, scenario.corridor, scenario.sim_config,
                           scenario.agents[idx].dest_s, control, weights,
-                          scenario.sim_config.get("leftover_coef", 0.05))
+                          scenario.sim_config.get("leftover_coef", 0.08))
 
 
 def control_from_bicycle(

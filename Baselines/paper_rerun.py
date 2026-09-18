@@ -31,53 +31,39 @@ from Baselines.ablation_models import (
 )
 from Baselines.registry import LEARNED_CHECKPOINTS, seed_checkpoint
 
-PAPER_OUTPUT = Path("Baselines/results/v3/paper_rerun")
-ABLATION_OUTPUT = Path("Baselines/results/v3/paper_ablation")
-STRESS_OUTPUT = Path("Baselines/results/v3/paper_stress")
+PAPER_OUTPUT = Path("Baselines/results/revision5/paper_rerun")
+ABLATION_OUTPUT = Path("Baselines/results/revision5/paper_ablation")
+STRESS_OUTPUT = Path("Baselines/results/revision5/paper_stress")
 
 TRAIN_SPECS: dict[str, list[str]] = {
-    "residual_param": ["--updates", "100", "--max-steps", "240", "--collision-penalty", "8", "--residual-mode", "param_delta"],
-    "residual_nominal": ["--updates", "100", "--max-steps", "240", "--collision-penalty", "8", "--prefer-params", "nominal"],
+    "residual_param": [
+        "--updates", "100", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
+        "--residual-mode", "param_delta",
+    ],
+    "residual_nominal": [
+        "--updates", "100", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
+        "--prefer-params", "nominal",
+    ],
     "residual_marl": [
-        "--updates",
-        "100",
-        "--max-steps",
-        "240",
-        "--collision-penalty",
-        "8",
-        "--residual-mode",
-        "candidate_logits",
+        "--updates", "100", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
+        "--residual-mode", "candidate_logits",
     ],
     "mappo": [
-        "--updates",
-        "100",
-        "--max-steps",
-        "240",
-        "--collision-penalty",
-        "8",
+        "--updates", "100", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
     ],
     "direct_discrete_rl": [
-        "--updates",
-        "100",
-        "--max-steps",
-        "240",
-        "--collision-penalty",
-        "8",
-        "--minibatch-size",
-        "512",
+        "--updates", "100", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
+        "--minibatch-size", "512",
     ],
     "residual_collpen_dense": [
-        "--updates",
-        "100",
-        "--num-agents",
-        "16",
-        "--collision-penalty",
-        "5",
-        "--dense-spawn",
-        "--max-steps",
-        "240",
-        "--residual-mode",
-        "candidate_logits",
+        "--updates", "100", "--num-agents", "16", "--dense-spawn", "--max-steps", "240",
+        "--collision-penalty", "0", "--collision-event-penalty", "1", "--gamma", "0.95",
+        "--residual-mode", "candidate_logits",
     ],
 }
 
@@ -175,7 +161,7 @@ def main() -> None:
     )
     p_train.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_TRAIN_SEEDS)
     p_train.add_argument("--jobs", type=int, default=1)
-    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/v3/paper_rerun"))
+    p_train.add_argument("--log-dir", type=Path, default=Path("RL/logs/revision5/paper_rerun"))
     p_train.add_argument("--overwrite", action="store_true")
     p_train.set_defaults(func=cmd_train)
 

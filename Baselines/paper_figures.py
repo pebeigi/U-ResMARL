@@ -35,8 +35,8 @@ from Baselines.runner import rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/v3/paper")
-BENCHMARK_RAW = Path("Baselines/results/v3/benchmark_raw.csv")
+DEFAULT_OUTPUT = Path("Baselines/results/revision5/paper")
+BENCHMARK_RAW = Path("Baselines/results/revision5/benchmark_raw.csv")
 
 # Clean main-table models for the paper figure (no reward-exploit / unstable MARL).
 PAPER_MODELS = [

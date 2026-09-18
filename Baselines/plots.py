@@ -243,3 +243,63 @@ def plot_distribution_comparison(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
+
+
+def plot_recorded_comparison(results, scenes, output_dir: Path, *, realism=True) -> None:
+    """Recorded references, never the unrelated whole-CSV marginal reference."""
+    from Baselines.realism import PAIRED_FEATURES, paired_feature_samples
+
+    models = list(results)
+    first = scenes[0]
+    fig, axes = plt.subplots(1, len(models), figsize=(6 * len(models), 5), squeeze=False)
+    for ax, model in zip(axes[0], models):
+        result = results[model][0]
+        for i in range(result.num_agents):
+            reference = first.reference_positions[first.history_steps:, i]
+            color = plt.get_cmap("tab20")(i % 20)
+            ax.plot(reference[:, 0], reference[:, 1], "--", color=color, alpha=.65,
+                    label="Observed" if i == 0 else None)
+            ax.plot(result.positions[:, i, 0], result.positions[:, i, 1], color=color,
+                    label="Simulated" if i == 0 else None)
+        ax.set(title=_label(model), xlabel="x (m)", ylabel="y (m)")
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.legend()
+    fig.suptitle("Matched recorded scene; historical fitting exposure unverified")
+    fig.tight_layout()
+    fig.savefig(output_dir / "benchmark_recorded_trajectories.png", dpi=180)
+    plt.close(fig)
+    if not realism:
+        return
+    by_seed = {s.scenario.seed: s for s in scenes}
+    simulated = {m: {k: [] for k in PAIRED_FEATURES} for m in models}
+    observed = {k: [] for k in PAIRED_FEATURES}
+    seen = set()
+    for model, rollouts in results.items():
+        for result in rollouts:
+            sim, obs = paired_feature_samples(result, by_seed[result.seed])
+            for key in PAIRED_FEATURES:
+                simulated[model][key].append(sim[key])
+                if result.seed not in seen:
+                    observed[key].append(obs[key])
+            seen.add(result.seed)
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    units = dict(speed="m/s", accel="m/s²", lateral="m", yaw_rate="rad/s", gap="m", ttc="s")
+    for ax, key in zip(axes.flat, PAIRED_FEATURES):
+        reference = np.concatenate(observed[key])
+        values = {m: np.concatenate(simulated[m][key]) for m in models}
+        all_values = np.concatenate([reference, *values.values()])
+        if not all_values.size:
+            continue
+        edges = np.histogram_bin_edges(all_values, bins=40)
+        ax.hist(reference, bins=edges, density=True, histtype="stepfilled",
+                color="0.65", alpha=.5, label="Matched observations")
+        for model in models:
+            if values[model].size:
+                ax.hist(values[model], bins=edges, density=True, histtype="step",
+                        label=_label(model))
+        ax.set(xlabel=f"{key} ({units[key]})", ylabel="Density")
+    axes.flat[0].legend(fontsize=8)
+    fig.suptitle("Matched recorded scenes; plots pool samples, metric scores average scenes")
+    fig.tight_layout()
+    fig.savefig(output_dir / "benchmark_recorded_distributions.png", dpi=180)
+    plt.close(fig)

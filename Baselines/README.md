@@ -9,6 +9,94 @@ The method adapts a calibrated discrete utility controller with a learned
 residual. The shared conflict filter can reduce collisions; it does not guarantee
 collision-free motion. Safety and performance claims require the corrected runs.
 
+## Recorded trajectories and behavioral realism
+
+Use the existing benchmark entry point to evaluate both kinds of data agreement:
+
+    python -m Baselines.benchmark --data-evaluation --data-split test --models utility_pt residual_marl --residual-checkpoint RL/checkpoints/revision5/development_5h_20260915_194407/residual_policy.pt --scenarios 10 --reference-model utility_pt --output-dir Baselines/results/revision5/recorded_test
+
+Supply the checkpoint being evaluated explicitly. This example's historical
+selected checkpoint is a **utility fallback**, so it cannot demonstrate a learned
+improvement. Raw results retain selection_status; a diagnostic export of the
+latest learned state must be labeled as such. The --train-seeds option supports
+comparisons across separately trained policies as in the ordinary benchmark.
+
+The --data-csv option defaults to data/Lebanon_Highway/Final_Lebanon_Data.csv, in
+the same metric coordinate frame as the selected --run-id / --lane-kf corridor.
+The --data-horizons option defaults to 1 3 5 seconds; horizons must be multiples
+of --dt. The horizon sets the rollout length; --num-agents and --max-steps only
+apply to randomly spawned scenarios. No additional launcher or reward is used.
+
+The recorded-scene protocol:
+
+- Splits each full recording chronologically into 60% train, 20% validation,
+  and 20% test. Whole vehicle tracks crossing a split boundary are purged;
+  a candidate scene with such a vehicle present is rejected. History and future
+  windows do not cross split boundaries or overlap neighboring sampled windows.
+- Initializes all eligible vehicles present in the selected corridor from one
+  second of recorded history. Initial velocity/heading use backward differences.
+  Desired speed is fixed at 8 m/s and the goal is the mapped corridor exit,
+  five metres before the end. Recorded future endpoints and speeds never enter
+  controller inputs. Every controller simulates the same initial cohort jointly;
+  logged neighboring vehicles are not replayed as unresponsive obstacles.
+- Uses the common 4.5 m by 1.8 m footprint and shared action filters. Initial
+  vehicles with missing history, speed outside the model range, opposing motion,
+  an already reached exit, or no boundary-feasible command are excluded and their
+  IDs/reasons saved. Initial vehicle overlaps are reported, not removed.
+  These exclusions and uniform footprints limit claims about the full observed
+  mixed-vehicle population. Later entrants are outside this closed-cohort test.
+- Computes ADE and FDE in metres, speed RMSE in m/s, and wrapped heading MAE
+  in radians at each horizon. ADE excludes the shared initial position. Each
+  horizon uses complete observed tracks and reports the count and coverage.
+  Missing observations, gaps, or lane exits end that track's reference.
+  Simulated contacts or arrivals never remove a prediction from scoring.
+  Heading error is omitted only where observed displacement speed is below
+  0.05 m/s; heading sample counts are saved.
+- Computes matched-scene Wasserstein distances and Jensen-Shannon divergences
+  for speed, acceleration, lateral position, yaw rate, nearest vehicle gap,
+  and TTC. Both sides use identical backward differences at the evaluation dt,
+  the same initial cohort and observed time coverage. Acceleration is derived
+  from motion, not commanded acceleration. No additional smoothing is applied
+  to the already filtered positions.
+- Uses two covering discs for gap/TTC geometry, with gaps capped at 60 m and
+  TTC at 10 s. Safe/no-neighbor TTC values remain in the distribution at 10 s.
+  This is an interaction diagnostic; actual collision metrics still use OBBs.
+  Histogram edges depend only on the matched reference and include overflow
+  bins, so models cannot change their own scoring bins.
+- Reports raw W1 in each feature's units, normalized W1, and JS using natural
+  logarithms (range 0 to ln(2)). Normalized W1 divides by the larger of observed
+  standard deviation and a floor: 0.1 for speed/acceleration/lateral position,
+  0.01 for yaw rate, 1 for gap/TTC, in corresponding units.
+  The realism_score is the mean normalized W1 over these six features:
+  **lower is better**. Keep individual feature scores; this composite is only
+  a diagnostic.
+
+Outputs use the existing benchmark_raw.csv, benchmark_summary.csv,
+benchmark_stats.csv, and paired benchmark_comparisons.csv, with new metric
+columns. The data_manifest.json records the source hash, calibration/checkpoint
+hashes, partition track IDs, sampled scenes, exclusions, and metric definitions.
+Recorded trajectory overlays and matched-distribution plots are also written
+unless --no-figures is supplied. Data-mode metric failures stop evaluation;
+they are not silently skipped.
+
+Raw summaries average scene metrics. Statistical comparisons first average
+within 30-second recording blocks (or the history+forecast span if longer),
+then bootstrap paired blocks and available training seeds. Intervals describe
+these blocks in this recording; residual dependence across blocks and lack of
+independent recordings remain limitations. Five-second arrival/travel metrics
+are short-window diagnostics and must not replace the longer random-scenario
+task benchmark.
+
+**Historical exposure limitation:** the existing calibration sampled one-step
+fitting choices before splitting closed-loop windows and did not save exposure
+IDs. These new partitions therefore carry
+holdout_status=retrospective_partition_prior_exposure_unverified. A new split
+cannot retroactively make old data independent of fitting. Use validation for
+development, reserve test for final reporting, and use genuinely unused
+recordings (with documented fitting provenance) for an independent test of the
+frozen utility and existing RL weights. This implementation changes neither the
+calibrated utility nor the RL reward/checkpoint selection.
+
 ## Hard road boundaries (v3)
 
 Road containment is enforced during training and evaluation for every controller,
@@ -202,7 +290,9 @@ python -m Baselines.paper_figures --all
 | --- | --- |
 | `utility_pt` | Calibrated prior, no RL |
 | `utility_nominal` | Uncalibrated nominal prior |
-| `residual_marl` | Full residual MARL |
+| `residual_marl` | Full residual MARL (trained residual + accept-if-better gate) |
+| `residual_no_gate` | Same trained residual, always execute residual argmax |
+| `residual_random_gate` | Randomly initialized residual + the same gate |
 | `residual_weights_only` | Freeze Δσ∥, Δσ⊥ (weights only) |
 | `residual_sigma_only` | Freeze weight residuals (σ only) |
 | `direct_discrete_rl` | Matched direct discrete PPO |
@@ -215,6 +305,15 @@ full-lookahead (`1.5 s / 4 substeps`) and no-lookahead (`1 step`) suites:
 ```bash
 python -m Baselines.ablation_stress --lookahead both --train-seeds 0 1 2
 python -m Baselines.paper_rerun eval
+```
+
+To isolate residual learning from the PDM-Closed gate under the 2-day sparse
+protocol (20 scenarios, 10 agents, 3 seeds):
+
+```bash
+python -m Baselines.ablation_stress --mode gate --scenarios 20 --num-agents 10 \
+    --max-steps 240 --train-seeds 0 1 2 --n-boot 5000 \
+    --output-dir Baselines/results/revision6/gate_ablation
 ```
 
 Outputs per suite: `*_raw.csv`, `*_stats.csv` (bootstrap CIs), `*_comparisons.csv`

@@ -22,6 +22,12 @@ class ValueNormalizer(nn.Module):
 
     @torch.no_grad()
     def update_value_stats(self, returns):
+        # PopArt: changing the target scale must not change V(s) by itself.
+        # Both policies using this mixin have a scalar linear critic head.
+        head = self.critic[-1]
+        if not isinstance(head, nn.Linear) or head.out_features != 1:
+            raise TypeError("Value normalization requires a scalar linear critic head")
+        old_mean, old_std = self.value_mean.clone(), self.value_std().clone()
         count = returns.new_tensor(float(returns.numel()))
         delta = returns.mean() - self.value_mean
         total = self.value_count + count
@@ -30,3 +36,6 @@ class ValueNormalizer(nn.Module):
         self.value_mean.add_(delta * count / total)
         self.value_var.copy_(var)
         self.value_count.copy_(total)
+        new_std = self.value_std()
+        head.weight.mul_(old_std / new_std)
+        head.bias.copy_((old_std * head.bias + old_mean - self.value_mean) / new_std)

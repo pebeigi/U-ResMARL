@@ -375,13 +375,7 @@ def main() -> None:
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
     parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
-    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/v3/residual_policy.pt"))
-    parser.add_argument(
-        "--rllib-checkpoint",
-        type=Path,
-        default=Path("RL/checkpoints/v3/rllib_ppo/checkpoint_final"),
-        help="RLlib checkpoint directory (preferred if it exists)",
-    )
+    parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/revision5/residual_policy.pt"))
     parser.add_argument("--no-gif", action="store_true", help="Skip GIF animation export")
     parser.add_argument("--baseline-only", action="store_true", help="Skip residual checkpoint even if present")
     args = parser.parse_args()
@@ -407,37 +401,13 @@ def main() -> None:
 
     residual = None
     if not args.baseline_only:
-        if args.rllib_checkpoint.exists() or list(args.rllib_checkpoint.parent.glob("checkpoint_*")):
-            print(f"Recording RLlib residual rollout from {args.rllib_checkpoint}...")
-            from RL.eval_rllib import find_latest_checkpoint, load_algorithm, record_rollout as record_rllib
-
-            ckpt = args.rllib_checkpoint
-            if ckpt.is_dir() and not (ckpt / "rllib_checkpoint.json").exists():
-                ckpt = find_latest_checkpoint(ckpt.parent if ckpt.name.startswith("checkpoint_") else ckpt)
-            algo = load_algorithm(ckpt)
-            from RL.gym_env import TrafficMARLEnv
-
-            rllib_env_config = dict(getattr(algo.config, "env_config", {}) or {})
-            rllib_env_config.update(
-                {
-                    "seed": args.seed,
-                    "max_steps": args.max_steps,
-                    "num_agents": args.num_agents,
-                    "run_id": args.run_id,
-                    "lane_kf": args.lane_kf,
-                    "base_params": base_params,
-                }
-            )
-            rllib_env = TrafficMARLEnv(rllib_env_config)
-            residual = record_rllib(rllib_env, algo, explore=False)
+        policy = load_policy(args.checkpoint)
+        if policy is not None:
+            print("Recording PyTorch residual rollout...")
+            residual_env = MultiAgentTrafficEnv(env_cfg, seed=args.seed)
+            residual = record_rollout(residual_env, policy=policy, explore_std=0.0)
         else:
-            policy = load_policy(args.checkpoint)
-            if policy is not None:
-                print("Recording PyTorch residual rollout...")
-                residual_env = MultiAgentTrafficEnv(env_cfg, seed=args.seed)
-                residual = record_rollout(residual_env, policy=policy, explore_std=0.0)
-            else:
-                print("No checkpoint found — plotting baseline only.")
+            print("No checkpoint found — plotting baseline only.")
 
     plot_trajectories(baseline, residual, OUTPUT_DIR / "trajectories_compare.png")
     print(f"Saved {OUTPUT_DIR / 'trajectories_compare.png'}")
