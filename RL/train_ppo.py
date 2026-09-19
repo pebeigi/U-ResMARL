@@ -155,9 +155,9 @@ class TorchResidualPolicy(ValueNormalizer):
             scale_vec = torch.full((dim,), float(candidate_logit_scale), dtype=torch.float32)
             self._residual_keys = tuple(f"c{i}" for i in range(dim))
         else:
-            scales = residual_scales or (
-                LEGACY_RESIDUAL_SCALES if self.param_gauge == "additive" else DEFAULT_RESIDUAL_SCALES
-            )
+        scales = residual_scales or (
+            LEGACY_RESIDUAL_SCALES if self.param_gauge == "additive" else DEFAULT_RESIDUAL_SCALES
+        )
             scale_vec = torch.tensor(
                 [float(scales[k]) for k in self._residual_keys], dtype=torch.float32
             )
@@ -300,7 +300,7 @@ class TorchResidualPolicy(ValueNormalizer):
         obs_t = torch.as_tensor(obs, dtype=torch.float32)
         if self.action_space == CATEGORICAL_ACTION_SPACE:
             from RL.candidate_policy import CandidateIndex
-            with torch.no_grad():
+        with torch.no_grad():
                 dist, value_norm = self.categorical_distribution(obs_t, utilities, mask)
                 action = dist.sample()
             return (CandidateIndex(int(action)), action.cpu().numpy(),
@@ -1173,7 +1173,7 @@ def train(args: argparse.Namespace) -> None:
             env = make_env(args, seed=train_seeds[update - 1][0])
             memory, metrics, collisions, realism, aux = collect_rollouts(
                 env, policy, args.episodes_per_update, episode_seeds=train_seeds[update - 1], gamma=args.gamma)
-            stats = ppo_update(
+        stats = ppo_update(
                 policy, optimizer, memory, gamma=args.gamma, gae_lambda=args.gae_lambda,
                 clip_coef=args.clip_coef, value_coef=args.value_coef, entropy_coef=args.entropy_coef,
                 epochs=args.ppo_epochs, minibatch_size=args.minibatch_size, target_kl=args.target_kl)
@@ -1240,13 +1240,13 @@ def train(args: argparse.Namespace) -> None:
 
     # Keep the latest optimizer/actor paired in the resumable state.
     latest_state = copy.deepcopy(policy.state_dict())
-    if best_state is not None:
-        policy.load_state_dict(best_state)
+        if best_state is not None:
+            policy.load_state_dict(best_state)
 
     # Honest report: the test seeds never took part in selection.
     prior_test = evaluate_deterministic(args, None, test_seeds, obb_safety_filter=True, label="Prior test")
     policy_test = evaluate_deterministic(args, policy, test_seeds, obb_safety_filter=True, label="Selected policy test")
-    print(
+        print(
         f"Held-out TEST ({len(test_seeds)} episodes, never used for selection): "
         f"metric={policy_test['metric']:.3f} (prior {prior_test['metric']:.3f}) | "
         f"arrival={policy_test['arrival_rate']:.3f} (prior {prior_test['arrival_rate']:.3f}) | "
@@ -1275,7 +1275,7 @@ def train(args: argparse.Namespace) -> None:
                 f"val metric={best_val['metric']:.3f} vs prior {prior_val['metric']:.3f}, "
                 f"val arrival={best_val['arrival_rate']:.3f} vs prior "
                 f"{prior_val['arrival_rate']:.3f}, val collisions={best_val['collisions']:.2f})"
-            )
+        )
 
 
 def main() -> None:
