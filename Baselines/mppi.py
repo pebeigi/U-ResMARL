@@ -20,9 +20,10 @@ from scipy.special import ndtr, ndtri
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
 from Baselines.dynamics import goal_approach_control
-from Baselines.dynamics import MAX_STEERING, control_obb_conflict, simulate_bicycle_batch, sanitize_control
+from Baselines.dynamics import MAX_STEERING, simulate_bicycle_batch
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
+from RL.routing import agent_route
 
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
@@ -141,7 +142,7 @@ class MPPIController(BaseController):
             candidates = nominal + self.noise_std * ndtri(np.clip(quantiles, 1e-12, 1 - 1e-12))
             candidates = np.clip(candidates, -limits, limits)
 
-            traj, speeds, _ = simulate_bicycle_batch(
+            traj, speeds, headings = simulate_bicycle_batch(
                 agent.pos,
                 float(agent.heading),
                 float(agent.speed),
@@ -150,10 +151,11 @@ class MPPIController(BaseController):
                 scenario,
             )
 
-            s_now, _, _, _, _ = scenario.corridor.project(agent.pos)
+            route = agent_route(scenario.corridor, agent)
+            s_now, _, _, _, _ = route.project(agent.pos)
             reach = float(agent.speed) * dt * self.horizon + 40.0
-            frame = build_local_frame(scenario.corridor, float(s_now), ahead=reach)
-            predictions = predict_neighbours(agents, i, self.horizon, dt)
+            frame = build_local_frame(route, float(s_now), ahead=reach)
+            predictions = predict_neighbours(agents, i, self.horizon, dt, sim_config=scenario.sim_config)
 
             cost = self._rollout_cost(
                 traj,
@@ -171,19 +173,37 @@ class MPPIController(BaseController):
             # and terms depending only on nominal cancel between sample weights.
             cost += self.temperature * np.sum(nominal * candidates / self.noise_std**2, axis=(1, 2))
 
+            from RL.decision import control_feasible, trajectory_obb_free
+            feasible = trajectory_obb_free(traj, headings, np.arange(self.horizon+1)*dt,
+                                            agents, i, scenario.sim_config)
+            for k in np.flatnonzero(feasible):
+                feasible[k] = control_feasible(i, agents, *candidates[k, 0], scenario.sim_config, scenario.corridor)
+            if not feasible.any():
+                controls.append((-max_accel, 0.))
+                self._nominal[agent.agent_id] = np.zeros_like(nominal)
+                continue
+            cost = np.where(feasible, cost, np.inf)
+
             weights = np.exp(-(cost - cost.min()) / max(self.temperature, 1e-6))
             weights /= max(float(weights.sum()), 1e-12)
             nominal = np.einsum("k,khc->hc", weights, candidates)
             nominal[:, 0] = np.clip(nominal[:, 0], -max_accel, max_accel)
             nominal[:, 1] = np.clip(nominal[:, 1], -MAX_STEERING, MAX_STEERING)
 
+            # A weighted average of safe trajectories need not itself be safe.
+            averaged, _, averaged_headings = simulate_bicycle_batch(
+                agent.pos, agent.heading, agent.speed, nominal[None, :, 0], nominal[None, :, 1], scenario)
+            if (not control_feasible(i, agents, *nominal[0], scenario.sim_config, scenario.corridor)
+                    or not trajectory_obb_free(averaged, averaged_headings, np.arange(self.horizon+1)*dt,
+                                               agents, i, scenario.sim_config)[0]):
+                nominal = candidates[int(np.argmin(cost))].copy()
+
             accel, steering = float(nominal[0, 0]), float(nominal[0, 1])
             # Receding horizon: shift the sequence and repeat the last command.
             self._nominal[agent.agent_id] = np.vstack([nominal[1:], nominal[-1:]])
 
-            remaining = float(self._dest_s[i]) - float(s_now)
             approach = goal_approach_control(agent, scenario, float(self._dest_s[i]))
-            if approach is not None:
+            if approach is not None and control_feasible(i, agents, *approach, scenario.sim_config, scenario.corridor):
                 accel, steering = approach
-            controls.append(sanitize_control(i, agent, agents, (accel, steering), scenario))
+            controls.append((accel, steering))
         return controls

@@ -243,6 +243,10 @@ class ORCAController(BaseController):
 
     def _wall_lines(self, agent: TrafficAgent, scenario: "Scenario") -> list[Line]:
         """Static half-planes keeping the agent inside the measured corridor."""
+        if hasattr(scenario.corridor, 'wall_contacts'):
+            tau = max(self.time_horizon_obstacle, 1e-3)
+            return [Line(-(clearance-self._radius)/tau * normal, np.array([normal[1], -normal[0]]))
+                    for clearance, normal in scenario.corridor.wall_contacts(agent.pos)]
         _, _, _, seg_i, t = scenario.corridor.project(agent.pos)
         lower, upper = scenario.corridor.edge_points_at(seg_i, t)
         chord = upper - lower

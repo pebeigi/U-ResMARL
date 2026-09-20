@@ -16,13 +16,13 @@ import numpy as np
 import Baselines._paths  # noqa: F401
 from Baselines.controllers import BaseController
 from RL.calibration_io import load_base_params
+from RL.decision import select_best_candidate
 from utility_model import (
     TrafficAgent,
     build_step_context,
     candidate_obb_conflict,
     evaluate_candidate_utility,
     generate_candidate_actions,
-    select_best_candidate,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -56,6 +56,10 @@ class UtilityPriorController(BaseController):
         agents: list[TrafficAgent],
         scenario: "Scenario",
     ) -> tuple[float, float]:
+        from utility_model import evaluate_candidate_utility
+        from RL.decision import local_agents
+        agents = local_agents(agents, idx, scenario.sim_config)
+        idx = 0
         candidates = generate_candidate_actions(agent, scenario.dt, scenario.sim_config)
         context = build_step_context(idx, agent, agents, scenario.sim_config)
         utilities = np.array(
@@ -70,7 +74,7 @@ class UtilityPriorController(BaseController):
         free_idx = [
             k
             for k, c in enumerate(candidates)
-            if not candidate_obb_conflict(c, idx, agents, scenario.sim_config, context=context)
+            if not scenario.sim_config.get("obb_safety_filter", True) or not candidate_obb_conflict(c, idx, agents, scenario.sim_config, context=context)
         ]
         pool = free_idx if free_idx else list(range(len(candidates)))
         utilities = utilities[pool]

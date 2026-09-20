@@ -1,0 +1,49 @@
+{
+  "supplied_metres_per_pixel": 0.04354578,
+  "absolute_scale_verified": false,
+  "curb_bounds": [
+    0.0,
+    1.5676,
+    55.6951,
+    31.3094
+  ],
+  "trajectory_bounds": {
+    "xloc_kf": [
+      0.073553211781901,
+      55.67059727004732
+    ],
+    "yloc_kf": [
+      0.0795220840971585,
+      31.317093789481508
+    ]
+  },
+  "recorded_centres_inside_curb_fraction": 0.9998520491196923,
+  "recorded_box_quantiles": {
+    "length_smoothed": {
+      "0.05": 0.7899560516634875,
+      "0.5": 1.0403006710307927,
+      "0.95": 1.7938722378427925
+    },
+    "width_smoothed": {
+      "0.05": 1.1119393316322739,
+      "0.5": 1.804414496990116,
+      "0.95": 2.102046349741125
+    }
+  },
+  "inferred_oriented_length_width": [
+    1.736111370077872,
+    0.6307312148084733
+  ],
+  "box_fit_rmse": 0.20505983664543947,
+  "box_fit_note": "Hypothesis: width_smoothed is image x extent and length_smoothed is y extent; not physical ground truth.",
+  "recorded_speed_median": 1.7377713489350466,
+  "coordinate_difference_speed_median": 1.7375711331768973,
+  "snapshot_time_s": 100.0,
+  "plotted_vehicle_ids": [
+    4597,
+    6505,
+    7022,
+    7191
+  ],
+  "note": "A scale correction must transform curb, trajectories, dimensions, speeds and accelerations together, then refit the utility prior."
+}

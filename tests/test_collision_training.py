@@ -144,7 +144,7 @@ class SavedFallbackTests(unittest.TestCase):
             args.save = Path(tmp) / "policy.pt"
             with patch("RL.train_ppo.make_env", return_value=env), \
                  patch("RL.train_ppo.evaluate_deterministic", side_effect=evaluate), \
-                 patch("RL.train_ppo.collect_rollouts", return_value=(None, [0.], [0], [float("nan")], {"control_flip_rate":0.})), \
+                 patch("RL.train_ppo.collect_rollouts", return_value=(None, [0.], [0], [float("nan")], {"control_flip_rate":0., "environment_steps":1, "active_agent_transitions":2})), \
                  patch("RL.train_ppo.ppo_update", side_effect=update), \
                  patch("RL.train_ppo._persist_curve"), contextlib.redirect_stdout(io.StringIO()):
                 train(args)

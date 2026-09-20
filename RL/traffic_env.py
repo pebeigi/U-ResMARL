@@ -22,12 +22,12 @@ from RL.behavior_reference import FEATURES as BEHAVIOR_FEATURES
 from RL.behavior_reference import load_behavior_reference
 from RL.obs import local_observation, observation_dim
 from RL.transition import advance_agents, DEFAULT_REWARD_WEIGHTS, DRIVING_REWARD_REVISION
+from RL.decision import select_candidate_with_logit_residual
 from utility_model import (
     DEFAULT_BASE_PARAMS,
     DEFAULT_SIM_CONFIG,
     TrafficAgent,
     sanitize_control_command,
-    select_candidate_with_logit_residual,
 )
 
 
@@ -132,6 +132,7 @@ class EnvConfig:
             self.sim_config["obb_safety_filter"] = bool(self.obb_safety_filter)
         self.sim_config.setdefault("boundary_safety_filter", True)
         self.sim_config.setdefault("boundary_margin", 0.1)
+        self.sim_config["decision_protocol_version"] = 1
         self.sim_config["spawn_protocol_version"] = SPAWN_PROTOCOL_VERSION
         self.sim_config["collision_filter_revision"] = 2
         self.sim_config["driving_reward_revision"] = DRIVING_REWARD_REVISION
@@ -306,18 +307,8 @@ class MultiAgentTrafficEnv:
         raise SpawnPackingError("No road-contained start pose with the requested spacing")
 
     def get_neighbors(self, agent_idx: int) -> list[int]:
-        ego = self.agents[agent_idx]
-        rp = self.config.sim_config["perception_radius"]
-        neighbors: list[tuple[float, int]] = []
-        for j, other in enumerate(self.agents):
-            if j == agent_idx or other.reached_destination:
-                continue
-            d = float(np.linalg.norm(other.pos - ego.pos))
-            if d <= rp:
-                neighbors.append((d, j))
-        neighbors.sort(key=lambda x: x[0])
-        max_n = self.config.sim_config["max_neighbors"]
-        return [j for _, j in neighbors[:max_n]]
+        from RL.decision import neighbor_indices
+        return neighbor_indices(self.agents, agent_idx, self.config.sim_config)
 
     def get_observation(self, agent_idx: int) -> np.ndarray:
         """Frenet ego state + remaining station + body-frame neighbors."""
@@ -337,7 +328,8 @@ class MultiAgentTrafficEnv:
 
     def _remaining_station(self, agent_idx: int) -> float:
         ego = self.agents[agent_idx]
-        s, _, _, _, _ = self.corridor.project(ego.pos)
+        from RL.routing import agent_station
+        s = agent_station(self.corridor, ego)
         dest_s = (
             self._dest_s[agent_idx]
             if agent_idx < len(getattr(self, "_dest_s", []))
@@ -452,7 +444,8 @@ class MultiAgentTrafficEnv:
             for i, move in enumerate(transition.candidates):
                 if move is None or self.agents[i].reached_destination:
                     continue
-                lateral = float(self.corridor.project(self.agents[i].pos)[1])
+                from RL.routing import agent_route
+                lateral = float(agent_route(self.corridor, self.agents[i]).project(self.agents[i].pos)[1])
                 # Use realized acceleration, including speed-cap saturation.
                 accel = float(move["realized_accel"])
                 speed = float(move["speed"])
@@ -484,6 +477,7 @@ class MultiAgentTrafficEnv:
             "steps": self.step_count,
             "destinations_reached": sum(a.reached_destination for a in self.agents),
             "selected_controls": selected_controls,
+            "proposed_controls": controls,
             "run_id": self.config.run_id,
             "lane_kf": self.config.lane_kf,
             "colliding_agents": sorted(hit),

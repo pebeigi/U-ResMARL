@@ -21,6 +21,7 @@ from Baselines.dynamics import goal_approach_control
 from Baselines.dynamics import MAX_STEERING, control_obb_conflict, simulate_bicycle_batch
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
+from RL.routing import agent_route
 
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
@@ -50,12 +51,13 @@ def braking_admissible(agent, agents, agent_idx, accels, steerings, scenario):
     braking[:, 0], turning[:, 0] = accels, steerings
     traj, _, _ = simulate_bicycle_batch(agent.pos, agent.heading, agent.speed,
                                        braking, turning, scenario)
-    station_now = scenario.corridor.project(agent.pos)[0]
-    frame = build_local_frame(scenario.corridor, station_now,
+    route = agent_route(scenario.corridor, agent)
+    station_now = route.project(agent.pos)[0]
+    frame = build_local_frame(route, station_now,
                               ahead=float(next_speed.max()) * dt * horizon + 20.)
     station, lateral, _ = frame.project_many(traj.reshape(-1, 2))
     valid = np.ones(len(accels), dtype=bool)
-    predictions = predict_neighbours(agents, agent_idx, horizon, dt)
+    predictions = predict_neighbours(agents, agent_idx, horizon, dt, sim_config=scenario.sim_config)
     if predictions.shape[0]:
         ns, nd, _ = frame.project_many(predictions.reshape(-1, 2))
         separation, _ = frenet_conflict(
@@ -150,8 +152,9 @@ class DWAController(BaseController):
                 scenario,
             )
 
-            s_now, _, _, _, _ = scenario.corridor.project(agent.pos)
-            frame = build_local_frame(scenario.corridor, float(s_now), ahead=self.lookahead + 60.0)
+            route = agent_route(scenario.corridor, agent)
+            s_now, _, _, _, _ = route.project(agent.pos)
+            frame = build_local_frame(route, float(s_now), ahead=self.lookahead + 60.0)
             station, lateral, clearance = frame.project_many(traj.reshape(-1, 2))
             station = station.reshape(k, self.horizon + 1)
             lateral = lateral.reshape(k, self.horizon + 1)
@@ -159,7 +162,7 @@ class DWAController(BaseController):
                 clearance.reshape(k, self.horizon + 1)[:, 1:].min(axis=1) - 0.5 * scenario.vehicle_width
             )
 
-            predictions = predict_neighbours(agents, i, self.horizon, dt)
+            predictions = predict_neighbours(agents, i, self.horizon, dt, sim_config=scenario.sim_config)
             if predictions.shape[0]:
                 shape = predictions.shape
                 n_station, n_lateral, _ = frame.project_many(predictions.reshape(-1, 2))
@@ -190,6 +193,9 @@ class DWAController(BaseController):
             heading_score = np.pi - heading_error
 
             admissible = clearance_score > 0.0
+            from RL.decision import control_feasible, trajectory_obb_free
+            admissible &= trajectory_obb_free(traj, headings, np.arange(self.horizon+1)*dt,
+                                               agents, i, scenario.sim_config)
             obb_ok = np.array(
                 [
                     not control_obb_conflict(i, agent, agents, float(a), float(s), scenario)
@@ -212,9 +218,8 @@ class DWAController(BaseController):
             score[~admissible] = -np.inf
 
             # Stop at the destination station.
-            remaining = float(self._dest_s[i]) - float(s_now)
             approach = goal_approach_control(agent, scenario, float(self._dest_s[i]))
-            if approach is not None:
+            if approach is not None and control_feasible(i, agents, *approach, scenario.sim_config, scenario.corridor):
                 controls.append(approach)
                 continue
 

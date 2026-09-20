@@ -16,10 +16,9 @@ from Baselines.controllers import BaseController
 from Baselines.dynamics import observation
 from RL.calibration_io import apply_residual, load_base_params, residual_scales_for_checkpoint
 from RL.param_gauge import AMPLITUDE_KEYS, AMPLITUDE_LOGIT_KEYS
+from RL.decision import select_best_candidate, select_candidate_with_logit_residual
 from utility_model import (
     TrafficAgent,
-    select_best_candidate,
-    select_candidate_with_logit_residual,
 )
 
 if TYPE_CHECKING:  # pragma: no cover

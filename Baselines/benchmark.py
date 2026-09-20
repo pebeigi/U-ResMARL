@@ -46,6 +46,52 @@ def preflight_models(models, args, scenario):
             controller.reset(scenario)
 
 
+def experiment_manifest(args, scenarios):
+    from RL.experiment_protocol import SELECTION_RULE, source_manifest
+    from Baselines.data_evaluation import file_sha256
+    import torch
+    records, selection_seeds, selection_config = [], None, None
+    for model in args.models:
+        if model not in LEARNED_CHECKPOINTS:
+            continue
+        for train_seed, checkpoint in resolve_train_seeds(model, args.train_seeds, base=_base_checkpoint(model, args)):
+            checkpoint = checkpoint or _base_checkpoint(model, args)
+            payload = torch.load(checkpoint, map_location='cpu', weights_only=False)
+            metadata = {k: payload.get(k) for k in ('selection_rule', 'selection_status', 'selected_update',
+                'val_seeds', 'validation_config', 'decision_protocol_version', 'budget', 'stopping_reason', 'validation', 'prior_validation')}
+            matched = metadata['selection_rule'] == SELECTION_RULE and metadata['decision_protocol_version'] == 1
+            if getattr(args, 'require_matched_protocol', False):
+                if not matched:
+                    raise ValueError(f'{model}: legacy/unmatched checkpoint; retrain or select under the common protocol')
+                if not metadata['val_seeds']:
+                    raise ValueError(f'{model}: missing validation seed manifest')
+                if not metadata['validation_config']:
+                    raise ValueError(f'{model}: missing validation configuration')
+                if selection_seeds is not None and selection_seeds != metadata['val_seeds']:
+                    raise ValueError('Learned models were selected on different validation scenarios')
+                selection_seeds = metadata['val_seeds']
+                if selection_config is not None and selection_config != metadata['validation_config']:
+                    raise ValueError('Learned models were selected with different validation conditions')
+                selection_config = metadata['validation_config']
+                expected_site = scenarios[0].sim_config.get('site_protocol')
+                if metadata['validation_config'].get('site_protocol') != expected_site:
+                    raise ValueError(f'{model}: site adapter/calibration differs from checkpoint selection')
+            records.append(dict(model=model, train_seed=train_seed, path=str(checkpoint.resolve()),
+                                sha256=file_sha256(checkpoint), matched_protocol=matched, **metadata))
+    return dict(decision_protocol_version=1, args=vars(args) if not getattr(args, 'data_evaluation', False)
+                else {k: v for k, v in vars(args).items() if not k.startswith('_')},
+                source_hashes=source_manifest(), checkpoints=records,
+                site_protocol=scenarios[0].sim_config.get('site_protocol'),
+                scenario_seeds=[s.seed for s in scenarios],
+                decision_information={'radius_m': scenarios[0].sim_config['perception_radius'],
+                                      'max_neighbors': scenarios[0].sim_config['max_neighbors'],
+                                      'predictor': 'constant_velocity'},
+                execution={'boundary_filter': True, 'obb_filter': not args.no_obb_safety_filter,
+                           'conflict_horizon_s': scenarios[0].sim_config['conflict_horizon'],
+                           'conflict_substeps': scenarios[0].sim_config['conflict_substeps']},
+                note='Native planner horizons retained; global execution filter shared. Legacy checkpoints are explicitly labeled.')
+
+
 def _attach_realism_metrics(frame: pd.DataFrame, realism: pd.DataFrame) -> pd.DataFrame:
     """Attach rollout-level realism metrics without a many-to-many key merge.
 
@@ -132,7 +178,12 @@ def run_benchmark(args: argparse.Namespace) -> tuple[pd.DataFrame, dict[str, lis
         flush=True,
     )
 
+    for scenario in scenarios:
+        if getattr(args, 'conflict_lookahead', 'full') == 'endpoint':
+            scenario.sim_config.update(conflict_horizon=scenario.dt, conflict_substeps=1)
     preflight_models(args.models, args, scenarios[0])
+    from RL.experiment_protocol import write_json
+    write_json(args.output_dir/'experiment_manifest.json', experiment_manifest(args, scenarios))
     results: dict[str, list[RolloutResult]] = {}
     train_seeds: dict[str, list[int]] = {}
     for model in args.models:
@@ -200,8 +251,8 @@ def _base_checkpoint(model: str, args: argparse.Namespace) -> Path | None:
         return args.residual_checkpoint
     if model == "pure_rl" and args.pure_rl_checkpoint is not None:
         return args.pure_rl_checkpoint
-    if model in {"mappo", "happo", "hatrpo"} and args.checkpoint_dir is not None:
-        return args.checkpoint_dir / f"{model}_policy.pt"
+    if model in LEARNED_CHECKPOINTS and not model.startswith('residual') and args.checkpoint_dir is not None:
+        return args.checkpoint_dir / LEARNED_CHECKPOINTS[model].name
     return LEARNED_CHECKPOINTS.get(model)
 
 
@@ -301,6 +352,10 @@ def main() -> None:
     parser.add_argument("--data-split", choices=["train", "validation", "test"], default="test")
     parser.add_argument("--data-horizons", nargs="+", type=float, default=[1., 3., 5.])
     parser.add_argument("--no-figures", action="store_true")
+    parser.add_argument("--require-matched-protocol", action="store_true",
+                        help="Reject legacy checkpoint selection/decision protocols and mismatched validation seeds")
+    parser.add_argument("--conflict-lookahead", choices=['full', 'endpoint'], default='full',
+                        help="Common candidate/execution OBB horizon; native planner trajectory horizons remain intact")
     args = parser.parse_args()
     if args.scenarios < 1 or args.dt <= 0:
         parser.error("--scenarios and --dt must be positive")

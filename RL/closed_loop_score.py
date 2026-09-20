@@ -90,12 +90,16 @@ def proposal_closed_loop_score(
 
     if not candidate_boundary_safe(agent, candidate, sim, corridor):
         return 0.0
+    from RL.decision import local_agents
+    agents = local_agents(agents, agent_idx, sim)
+    agent_idx = 0
     context = build_step_context(agent_idx, agent, agents, sim)
     nc = 0.0 if candidate_obb_conflict(candidate, agent_idx, agents, sim, context=context) else 1.0
     dt = max(float(sim["dt"]), 1e-6)
     speed_cap = max(float(sim.get("max_agent_speed", 16.0)), 1e-6)
-    s0 = float(corridor.project(agent.pos)[0])
-    s1 = float(corridor.project(np.asarray(candidate["pos"], dtype=float))[0])
+    from RL.routing import agent_station
+    s0 = agent_station(corridor, agent)
+    s1 = agent_station(corridor, agent, np.asarray(candidate['pos'], dtype=float))
     progress = float(np.clip((s1 - s0) / (speed_cap * dt), 0.0, 1.0))
     ego_next = SimpleNamespace(pos=np.asarray(candidate["pos"], dtype=float),
                                heading=float(candidate["heading"]))

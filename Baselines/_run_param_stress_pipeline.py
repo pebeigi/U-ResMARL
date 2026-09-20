@@ -32,8 +32,9 @@ TRAIN_FWD = [
     "--collision-penalty", "0",
     "--collision-event-penalty", "1",
     "--gamma", "0.95",
-    "--val-every", "6",
-    "--val-episodes", "8",
+    "--val-every", "10",
+    "--val-episodes", "16",
+    "--test-episodes", "16",
     "--log-every", "1",
     "--skip-test",
 ]

@@ -10,6 +10,7 @@ from RL.closed_loop_score import soft_comfort_factor, soft_safety_factor
 from RL.corridor import boundary_reward, boxes_overlap
 from RL.obs import contact_safety_reward, footprint_surface_gap
 from utility_model import kinematic_bicycle_rollout, sanitize_control_command
+from RL.routing import agent_route, agent_station, arrival_reached
 
 # Revision 6 follows CaRL (Jaeger et al.): route progress is the only dense
 # positive term; TTC/comfort multiply that progress; hard contact is a terminal
@@ -30,7 +31,8 @@ def driving_reward(agents, idx, corridor, sim, dest_s, control, weights=None,
     """
     ego = agents[idx]
     w = DEFAULT_REWARD_WEIGHTS if weights is None else weights
-    s, _, tangent, _, _ = corridor.project(ego.pos)
+    _, _, tangent, _, _ = agent_route(corridor, ego).project(ego.pos)
+    s = agent_station(corridor, ego)
     heading = float(np.arctan2(tangent[1], tangent[0]))
     speed_cap = max(float(sim.get("max_agent_speed", 16.0)), 1e-6)
     if previous_station is None:
@@ -84,7 +86,8 @@ def advance_agents(agents, controls, corridor, sim, dest_s, *, reward_weights=No
         raise ValueError("Expected one command and destination per agent")
     dt = float(sim["dt"])
     active = [not a.reached_destination for a in agents]
-    stations_before = [float(corridor.project(a.pos)[0]) for a in agents]
+    stations_before = [agent_station(corridor, a) for a in agents]
+    routes = [agent_route(corridor, a) for a in agents]
     executed, moves, rewards = [], [], []
     for i, agent in enumerate(agents):
         if not active[i]:
@@ -115,6 +118,7 @@ def advance_agents(agents, controls, corridor, sim, dest_s, *, reward_weights=No
         heading=move["heading"] if move is not None else a.heading,
         speed=move["speed"] if move is not None else a.speed,
         reached_destination=not active[i],
+        dest=a.dest, _route_geometry=routes[i],
     ) for i, (a, move) in enumerate(zip(agents, moves))]
     for i in range(len(agents)):
         if active[i]:
@@ -127,7 +131,7 @@ def advance_agents(agents, controls, corridor, sim, dest_s, *, reward_weights=No
     for i, agent in enumerate(agents):
         if active[i]:
             agent.update_state_from_candidate(moves[i], dt, tol)
-            if agent.reached_destination or corridor.project(agent.pos)[0] >= dest_s[i] - tol:
+            if arrival_reached(corridor, agent, dest_s[i], tol):
                 agent.reached_destination = True
                 arrived.add(i)
                 rewards[i] += arrival_bonus

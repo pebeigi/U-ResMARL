@@ -26,7 +26,9 @@ def road_region(corridor, margin=0.0):
         raise ValueError("Boundary margin must be finite and nonnegative")
     key = (id(corridor), float(margin))
     if key not in _ROADS:
-        polygon = Polygon(np.vstack((corridor.lower, corridor.upper[::-1])))
+        polygon = getattr(corridor, 'roadway', None)
+        if polygon is None:
+            polygon = Polygon(np.vstack((corridor.lower, corridor.upper[::-1])))
         if not polygon.is_valid or polygon.is_empty:
             raise ValueError("Road boundaries must form a valid polygon")
         region = polygon.buffer(-float(margin)) if margin else polygon

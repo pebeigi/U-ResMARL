@@ -1,8 +1,8 @@
 """Shared kinematics, observations and reward used by every benchmarked model.
 
-All controllers plug into the same bicycle integrator, the same oriented-box
-collision test and the same corridor-progress arrival rule, so differences in
-the metrics come from the policy and nothing else.
+All controllers share execution dynamics, contact detection and arrival rules.
+Decision-time prediction and feasibility are defined separately in RL.decision;
+matching execution alone does not establish equal policy information or budgets.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 import Baselines._paths  # noqa: F401
+from RL.routing import agent_route
 from RL.corridor import boundary_reward
 from RL.obs import local_observation
 from RL.transition import DEFAULT_REWARD_WEIGHTS, driving_reward
@@ -37,6 +38,9 @@ def wrap_angle(angle: float) -> float:
 def project_and_clearances(corridor, point: np.ndarray) -> tuple[float, float, np.ndarray, float, float]:
     """Single corridor projection reused for both Frenet state and edge clearances."""
     s, lateral, tangent, seg_i, t = corridor.project(point)
+    if hasattr(corridor, 'roadway'):
+        lo, hi, _ = corridor.clearances(point)
+        return s, lateral, tangent, lo, hi
     lower, upper = corridor.edge_points_at(seg_i, t)
     chord = upper - lower
     chord_len = float(np.linalg.norm(chord))
@@ -51,18 +55,8 @@ def project_and_clearances(corridor, point: np.ndarray) -> tuple[float, float, n
 
 def neighbors_of(agents: list[TrafficAgent], idx: int, scenario: "Scenario") -> list[int]:
     """Nearest neighbours inside the perception radius (same rule as the RL env)."""
-    ego = agents[idx]
-    radius = float(scenario.sim_config["perception_radius"])
-    max_n = int(scenario.sim_config["max_neighbors"])
-    ranked: list[tuple[float, int]] = []
-    for j, other in enumerate(agents):
-        if j == idx or other.reached_destination:
-            continue
-        d = float(np.linalg.norm(other.pos - ego.pos))
-        if d <= radius:
-            ranked.append((d, j))
-    ranked.sort(key=lambda x: x[0])
-    return [j for _, j in ranked[:max_n]]
+    from RL.decision import neighbor_indices
+    return neighbor_indices(agents, idx, scenario.sim_config)
 
 
 def observation(agents: list[TrafficAgent], idx: int, scenario: "Scenario") -> np.ndarray:
@@ -129,6 +123,9 @@ def control_obb_conflict(
     """True if the one-step bicycle command overlaps a CV-predicted neighbour OBB."""
     if not scenario.sim_config.get("obb_safety_filter", True):
         return False
+    from RL.decision import local_agents
+    agents = local_agents(agents, agent_idx, scenario.sim_config)
+    agent_idx = 0
     cand = control_from_bicycle(agent_idx, agent, agents, accel, steering, scenario)
     context = build_step_context(agent_idx, agent, agents, scenario.sim_config)
     return candidate_obb_conflict(
@@ -167,9 +164,12 @@ def lookahead_point(
     station, so the agent holds its own lateral offset instead of being pulled
     onto the centreline.
     """
-    s, lateral, _, _, _ = scenario.corridor.project(agent.pos)
+    route = agent_route(scenario.corridor, agent)
+    s, lateral, _, _, _ = route.project(agent.pos)
     target_s = min(s + lookahead, dest_s)
-    point, _ = scenario.corridor.xy_from_frenet(target_s, lateral)
+    if hasattr(scenario.corridor, 'remaining_to_goal'):
+        lateral *= min(1., max(0., dest_s-s)/max(lookahead, 1e-6))
+    point, _ = route.xy_from_frenet(target_s, lateral)
     return point
 
 
@@ -185,7 +185,7 @@ def preferred_velocity(
     norm = float(np.linalg.norm(delta))
     if norm < 1e-6:
         return np.zeros(2, dtype=float)
-    s, _, _, _, _ = scenario.corridor.project(agent.pos)
+    s, _, _, _, _ = agent_route(scenario.corridor, agent).project(agent.pos)
     remaining = max(dest_s - s, 0.0)
     # Slow down smoothly over the last few metres so the agent stops at the goal.
     speed = min(agent.desired_speed, max(0.0, remaining) / max(scenario.dt, 1e-6))
@@ -245,7 +245,7 @@ def apply_control(
 
 def goal_approach_control(agent: TrafficAgent, scenario: "Scenario", dest_s: float):
     """Slow near a goal while retaining enough speed to enter its arrival region."""
-    s = float(scenario.corridor.project(agent.pos)[0])
+    s = float(agent_route(scenario.corridor, agent).project(agent.pos)[0])
     remaining = max(float(dest_s) - s, 0.0)
     if remaining >= max(agent.speed * scenario.dt * 2.0, 3.0):
         return None
@@ -295,7 +295,10 @@ def simulate_bicycle_batch(
     for h in range(horizon):
         v_prev = speeds[:, h]
         v_next = np.clip(v_prev + accels[:, h] * dt, 0.0, max_speed)
-        yaw_rate = (v_prev / wheelbase) * np.tan(steerings[:, h])
+        yaw_speed = v_prev
+        if scenario.sim_config.get('steer_from_rest', False):
+            yaw_speed = np.maximum(np.maximum(v_prev, v_next), scenario.sim_config.get('min_steer_speed', .5))
+        yaw_rate = (yaw_speed / wheelbase) * np.tan(steerings[:, h])
         psi = headings[:, h] + yaw_rate * dt
         positions[:, h + 1, 0] = positions[:, h, 0] + v_next * np.cos(psi) * dt
         positions[:, h + 1, 1] = positions[:, h, 1] + v_next * np.sin(psi) * dt

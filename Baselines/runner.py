@@ -61,8 +61,9 @@ def _agent_state(
         pos[i] = a.pos
         head[i] = a.heading
         spd[i] = a.speed
-        s, lateral, _, c_lo, c_hi = project_and_clearances(scenario.corridor, a.pos)
-        sta[i] = s
+        from RL.routing import agent_route, agent_station
+        s, lateral, _, c_lo, c_hi = project_and_clearances(agent_route(scenario.corridor, a), a.pos)
+        sta[i] = agent_station(scenario.corridor, a)
         lat[i] = lateral
         from RL.boundary import footprint_clearance
         clr[i] = footprint_clearance(scenario.corridor, a.pos, a.heading,
@@ -80,11 +81,18 @@ class RolloutRecorder:
         self.states = [_agent_state(agents, scenario)]
         self.actives = [np.array([not a.reached_destination for a in agents])]
         self.controls = []
+        self.proposed_controls = []
+        self.interventions = self.decisions = 0
         self.arrival_step = np.full(len(agents), -1, dtype=int)
         self.collision_steps = self.collision_events = self.offroad_steps = 0
         self.colliding_agents, self.offroad_agents, self.active_pairs = set(), set(), set()
 
-    def record(self, agents, controls, collision_pairs):
+    def record(self, agents, controls, collision_pairs, proposed_controls=None):
+        proposed = np.asarray(controls if proposed_controls is None else proposed_controls, dtype=float)
+        self.proposed_controls.append(proposed)
+        self.decisions += int(self.actives[-1].sum())
+        changed = np.any(np.abs(proposed-np.asarray(controls)) > 1e-8, axis=-1)
+        self.interventions += int((changed & self.actives[-1]).sum())
         self.controls.append(np.asarray(controls, dtype=float))
         self.states.append(_agent_state(agents, self.scenario))
         active = np.array([not a.reached_destination for a in agents])
@@ -122,6 +130,11 @@ class RolloutRecorder:
             start_s=np.array([a.start_s for a in scenario.agents]),
             wall_time=time.perf_counter() - self.started,
             extra={"spawn_protocol_version": scenario.sim_config.get("spawn_protocol_version", 1),
+                   "decision_protocol_version": scenario.sim_config.get("decision_protocol_version", 1),
+                   "shield_interventions": self.interventions,
+                   "shield_decisions": self.decisions,
+                   "shield_intervention_rate": self.interventions/max(1, self.decisions),
+                   "proposed_controls": np.asarray(self.proposed_controls).tolist(),
                    "collision_filter_revision": scenario.sim_config.get("collision_filter_revision", 1),
                    **(extra or {})},
         )
@@ -140,7 +153,7 @@ def rollout(
     for step in range(scenario.max_steps):
         controls = controller.compute_controls(agents, scenario, step)
         transition = advance_agents(agents, controls, scenario.corridor, scenario.sim_config, dest_s)
-        recorder.record(agents, transition.controls, transition.collision_pairs)
+        recorder.record(agents, transition.controls, transition.collision_pairs, proposed_controls=controls)
         if stop_when_all_arrived and all(a.reached_destination for a in agents):
             break
     return recorder.result(extra={

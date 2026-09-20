@@ -139,6 +139,8 @@ def load_direct_discrete_policy(checkpoint: Path, obs_dim: int, num_actions: int
     )
     policy.load_state_dict(blob["state_dict"])
     policy.eval()
+    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 
 

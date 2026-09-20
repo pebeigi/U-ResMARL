@@ -113,10 +113,11 @@ def build_scenario(
 def scenario_from_env(env: MultiAgentTrafficEnv, seed: int) -> Scenario:
     """Snapshot an already-reset environment for the shared rollout recorder."""
     cfg, corridor = env.config, env.corridor
+    from RL.routing import agent_station
     agents = [AgentInit(
         agent_id=a.agent_id, pos=a.pos.copy(), vel=a.vel.copy(), heading=float(a.heading),
         dest=a.dest.copy(), dest_s=float(env._dest_s[i]),
-        start_s=float(corridor.project(a.pos)[0]), desired_speed=float(a.desired_speed),
+        start_s=agent_station(corridor, a), desired_speed=float(a.desired_speed),
     ) for i, a in enumerate(env.agents)]
     return Scenario(seed=seed, run_id=cfg.run_id, lane_kf=cfg.lane_kf, dt=cfg.dt,
                     max_steps=cfg.max_steps, sim_config=dict(cfg.sim_config),

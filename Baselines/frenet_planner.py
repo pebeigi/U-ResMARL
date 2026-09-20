@@ -22,6 +22,7 @@ from Baselines.dynamics import goal_approach_control
 from Baselines.dynamics import velocity_to_control, wrap_angle
 from Baselines.local_frame import build_local_frame, frenet_conflict, predict_neighbours
 from utility_model import TrafficAgent
+from RL.routing import agent_route
 
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
@@ -190,6 +191,7 @@ class FrenetPlannerController(BaseController):
         scenario: "Scenario",
         step: int,
     ) -> list[tuple[float, float]]:
+        from RL.decision import control_feasible, trajectory_obb_free
         dt = float(scenario.dt)
         max_speed = float(scenario.sim_config.get("max_agent_speed", 16.0))
         offsets, horizons, speed_deltas = self._grid
@@ -201,7 +203,8 @@ class FrenetPlannerController(BaseController):
                 controls.append((0.0, 0.0))
                 continue
 
-            s0, d0, tangent, _, _ = scenario.corridor.project(agent.pos)
+            route = agent_route(scenario.corridor, agent)
+            s0, d0, tangent, _, _ = route.project(agent.pos)
             tangent_angle = float(np.arctan2(tangent[1], tangent[0]))
             heading_error = wrap_angle(float(agent.heading) - tangent_angle)
             speed = float(agent.speed)
@@ -209,9 +212,8 @@ class FrenetPlannerController(BaseController):
             d_dot = speed * np.sin(heading_error)
 
             dest_s = float(self._dest_s[i])
-            remaining = dest_s - float(s0)
             approach = goal_approach_control(agent, scenario, dest_s)
-            if approach is not None:
+            if approach is not None and control_feasible(i, agents, *approach, scenario.sim_config, scenario.corridor):
                 controls.append(approach)
                 continue
 
@@ -238,7 +240,7 @@ class FrenetPlannerController(BaseController):
             lon_jerk = _polyval(lon_coeffs, times, derivative=3)
 
             frame = build_local_frame(
-                scenario.corridor,
+                route,
                 float(s0),
                 ahead=float(np.max(s_path) - s0) + 20.0,
             )
@@ -256,7 +258,7 @@ class FrenetPlannerController(BaseController):
                 min(self.max_accel, float(scenario.sim_config.get("max_accel", 4.))),
                 np.tan(.45) / float(scenario.sim_config.get("wheelbase", 2.8)))
 
-            predictions = predict_neighbours(agents, i, steps, dt)
+            predictions = predict_neighbours(agents, i, steps, dt, sim_config=scenario.sim_config)
             if predictions.shape[0]:
                 # Match neighbours to each candidate's actual times, including a
                 # partial final interval. Ignore repeated padded endpoints.
@@ -281,6 +283,15 @@ class FrenetPlannerController(BaseController):
             )
             cost = self.k_lateral * cost_lat + self.k_longitudinal * cost_lon
 
+            delta = np.diff(world, axis=1)
+            headings = np.concatenate([np.full((n_candidates, 1), agent.heading),
+                                       np.arctan2(delta[..., 1], delta[..., 0])], axis=1)
+            feasible &= trajectory_obb_free(world, headings, times, agents, i, scenario.sim_config)
+            commands = [None] * n_candidates
+            for k in np.flatnonzero(feasible):
+                commands[k] = velocity_to_control(agent, (world[k, 1]-agent.pos)/dt, scenario)
+                feasible[k] = control_feasible(i, agents, *commands[k], scenario.sim_config, scenario.corridor)
+
             if not np.any(feasible):
                 # No feasible trajectory in the sample set: emergency brake, the
                 # standard fallback for this planner family.
@@ -288,7 +299,5 @@ class FrenetPlannerController(BaseController):
                 continue
             best = int(np.argmin(np.where(feasible, cost, np.inf)))
 
-            next_point = world[best, 1]
-            v_desired = (next_point - agent.pos) / dt
-            controls.append(velocity_to_control(agent, v_desired, scenario))
+            controls.append(commands[best])
         return controls

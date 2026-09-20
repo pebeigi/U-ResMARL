@@ -73,12 +73,15 @@ def local_observation(
 ) -> np.ndarray:
     """[s, n, v, heading_err, goal_err, c_lo, c_hi, remaining_s] + k neighbors."""
     obs = np.zeros(observation_dim(max_neighbors), dtype=np.float32)
-    s, n, tangent, _, _ = corridor.project(ego.pos)
+    from RL.routing import agent_route, agent_station
+    route = agent_route(corridor, ego)
+    _, n, tangent, _, _ = route.project(ego.pos)
+    s = agent_station(corridor, ego)
     tangent_angle = float(np.arctan2(tangent[1], tangent[0]))
     c_lo, c_hi, _ = corridor.clearances(ego.pos)
     heading = float(ego.heading)
     if dest_s is None:
-        dest_s = float(corridor.project(ego.dest)[0])
+        dest_s = 0. if hasattr(corridor, 'remaining_to_goal') else float(corridor.project(ego.dest)[0])
     remaining = max(float(dest_s) - float(s), 0.0)
 
     obs[0] = float(s)

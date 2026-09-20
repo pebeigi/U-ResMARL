@@ -82,6 +82,9 @@ class SocialForceController(BaseController):
         return force
 
     def _wall_force(self, agent: TrafficAgent, scenario: "Scenario") -> np.ndarray:
+        if hasattr(scenario.corridor, 'wall_contacts'):
+            return sum((self.a_wall*np.exp((self._radius-clearance)/self.b_wall)*normal
+                        for clearance, normal in scenario.corridor.wall_contacts(agent.pos)), np.zeros(2))
         _, _, _, seg_i, t = scenario.corridor.project(agent.pos)
         lower, upper = scenario.corridor.edge_points_at(seg_i, t)
         chord = upper - lower

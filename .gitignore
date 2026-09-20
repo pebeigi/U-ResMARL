@@ -76,6 +76,19 @@ Baselines/results/
 RL/logs/
 .retired_rl_outputs/
 
+# Isolated site runs (regenerated; keep source in TGSIM Case / Roundabout Case)
+TGSIM Case/runs/
+TGSIM Case/checkpoints/
+TGSIM Case/results/
+TGSIM Case/logs/
+TGSIM Case/artifacts/
+Roundabout Case/runs/
+Roundabout Case/__pycache__/
+
+# New Baselines local dumps
+New Baselines/artifacts/
+New Baselines/checkpoints/
+
 # Ray / RLlib local caches
 ray_results/
 ~/ray_results/

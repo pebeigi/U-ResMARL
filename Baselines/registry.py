@@ -200,7 +200,16 @@ def _marl(algo: str) -> Callable[..., Controller]:
     return factory
 
 
+def _new_generation(name: str) -> Callable[..., Controller]:
+    def factory(**kwargs: Any) -> Controller:
+        from Baselines.new_generation import build_new_controller
+        return build_new_controller(name, **kwargs)
+    return factory
+
+
 REGISTRY: dict[str, Callable[..., Controller]] = {
+    "ctrl_sim": _new_generation("ctrl_sim"),
+    "ctg_plus_plus": _new_generation("ctg_plus_plus"),
     "utility_pt": _utility_pt,
     "utility_pt_logit": _utility_pt_logit,
     "utility_nominal": _utility_nominal,
@@ -244,6 +253,8 @@ DEFAULT_MODELS = [
 
 # Human-readable labels for tables and figures.
 LABELS = {
+    "ctrl_sim": "CtRL-Sim (local adaptation)",
+    "ctg_plus_plus": "CTG++ (CtRL-Sim reimplementation, adapted)",
     "utility_pt": "Utility prior (PT)",
     "utility_nominal": "Utility prior (nominal)",
     "utility_pt_logit": "Utility prior (logit choice)",
@@ -274,6 +285,8 @@ LABELS = {
 # Models whose behavior depends on a training seed, with the checkpoint that a
 # single-seed run writes. Seeded runs append "_seed<k>" to the stem.
 LEARNED_CHECKPOINTS: dict[str, Path] = {
+    "ctrl_sim": Path("New Baselines/checkpoints/ctrl_sim_policy.pt"),
+    "ctg_plus_plus": Path("New Baselines/checkpoints/ctg_plus_plus_policy.pt"),
     "residual_marl": Path("RL/checkpoints/revision5/residual_policy.pt"),
     "residual_no_gate": Path("RL/checkpoints/revision5/residual_policy.pt"),
     "residual_sigma_frozen": Path("RL/checkpoints/revision5/residual_param_policy.pt"),
@@ -364,9 +377,8 @@ def controller_kwargs(
     if name in {"utility_pt", "utility_pt_logit"}:
         return {"calibration": calibration}
     if name == "pure_rl":
-        return {"checkpoint": pure_rl_checkpoint} if pure_rl_checkpoint is not None else {}
-    if name == "direct_discrete_rl":
-        return {}
-    if name in {"mappo", "happo", "hatrpo"} and checkpoint_dir is not None:
-        return {"checkpoint": checkpoint_dir / f"{name}_policy.pt"}
+        if pure_rl_checkpoint is not None:
+            return {"checkpoint": pure_rl_checkpoint}
+    if name in LEARNED_CHECKPOINTS and checkpoint_dir is not None:
+        return {"checkpoint": checkpoint_dir / LEARNED_CHECKPOINTS[name].name}
     return {}

@@ -88,6 +88,8 @@ class LocalFrame:
 
 def build_local_frame(corridor, station: float, back: float = 15.0, ahead: float = 80.0) -> LocalFrame:
     """Extract the corridor window covering [station - back, station + ahead]."""
+    if hasattr(corridor, 'make_local_frame'):
+        return corridor.make_local_frame(station, back, ahead)
     lo = float(station) - float(back)
     hi = float(station) + float(ahead)
     i0 = int(np.searchsorted(corridor.cumulative_s, lo, side="right") - 1)
@@ -153,19 +155,13 @@ def predict_neighbours(
     horizon_steps: int,
     dt: float,
     radius: float = 60.0,
-    max_neighbours: int = 8,
+    max_neighbours: int = 6,
+    sim_config=None,
 ) -> np.ndarray:
     """Constant-velocity prediction of nearby agents: (k, horizon_steps+1, 2)."""
-    ego = agents[ego_idx]
-    ranked = []
-    for j, other in enumerate(agents):
-        if j == ego_idx or other.reached_destination:
-            continue
-        d = float(np.linalg.norm(other.pos - ego.pos))
-        if d <= radius:
-            ranked.append((d, j))
-    ranked.sort(key=lambda x: x[0])
-    selected = [j for _, j in ranked[:max_neighbours]]
+    from RL.decision import neighbor_indices
+    sim = sim_config or {"perception_radius": radius, "max_neighbors": max_neighbours}
+    selected = neighbor_indices(agents, ego_idx, sim)
     if not selected:
         return np.zeros((0, horizon_steps + 1, 2))
 

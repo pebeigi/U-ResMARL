@@ -155,9 +155,9 @@ class TorchResidualPolicy(ValueNormalizer):
             scale_vec = torch.full((dim,), float(candidate_logit_scale), dtype=torch.float32)
             self._residual_keys = tuple(f"c{i}" for i in range(dim))
         else:
-        scales = residual_scales or (
-            LEGACY_RESIDUAL_SCALES if self.param_gauge == "additive" else DEFAULT_RESIDUAL_SCALES
-        )
+            scales = residual_scales or (
+                LEGACY_RESIDUAL_SCALES if self.param_gauge == "additive" else DEFAULT_RESIDUAL_SCALES
+            )
             scale_vec = torch.tensor(
                 [float(scales[k]) for k in self._residual_keys], dtype=torch.float32
             )
@@ -300,7 +300,7 @@ class TorchResidualPolicy(ValueNormalizer):
         obs_t = torch.as_tensor(obs, dtype=torch.float32)
         if self.action_space == CATEGORICAL_ACTION_SPACE:
             from RL.candidate_policy import CandidateIndex
-        with torch.no_grad():
+            with torch.no_grad():
                 dist, value_norm = self.categorical_distribution(obs_t, utilities, mask)
                 action = dist.sample()
             return (CandidateIndex(int(action)), action.cpu().numpy(),
@@ -340,7 +340,7 @@ def collect_rollouts(
     env: MultiAgentTrafficEnv,
     policy: TorchResidualPolicy,
     episodes_per_update: int,
-    *, episode_seeds: list[int] | None = None, gamma: float = 0.99,
+    *, episode_seeds: list[int] | None = None, gamma: float = 0.99, max_env_steps: int | None = None,
 ) -> tuple[PPOMemory, list[float], list[int], list[float], dict[str, float]]:
     memory = PPOMemory([], [], [], [], [], [], [], [], [])
     categorical = policy.action_space == CATEGORICAL_ACTION_SPACE
@@ -355,7 +355,10 @@ def collect_rollouts(
     decisions = 0
     num_agents = len(env.agents) if env.agents else env.config.num_agents
 
+    environment_steps = 0
     for episode in range(episodes_per_update):
+        if max_env_steps is not None and environment_steps >= max_env_steps:
+            break
         if episode_seeds is not None:
             env.rng = np.random.default_rng(episode_seeds[episode])
         obs_list = env.reset()
@@ -387,7 +390,10 @@ def collect_rollouts(
             obs_list, rewards, done, info = env.step(residual_actions)
             episode_return += float(np.sum(rewards)) / num_agents
             discounted_return += gamma**step * float(np.sum(rewards)) / num_agents
-            truncated = bool(info.get("truncated", False))
+            environment_steps += 1
+            budget_end = max_env_steps is not None and environment_steps >= max_env_steps
+            truncated = bool(info.get("truncated", False) or (budget_end and not done))
+            done = bool(done or budget_end)
             flips += int(info.get("control_flips", 0))
             decisions += int(info.get("control_decisions", 0))
             for i in active:
@@ -416,6 +422,8 @@ def collect_rollouts(
         discounted_returns.append(discounted_return)
 
     aux = {
+        "environment_steps": environment_steps,
+        "active_agent_transitions": len(memory.actions),
         "collision_events": float(np.mean(events)),
         "control_flip_rate": float(flips / decisions) if decisions else 0.0,
         "control_flips": float(flips),
@@ -752,7 +760,7 @@ def evaluate_deterministic(
             discounted_return += float(getattr(args, "gamma", .99))**step * float(np.sum(rewards)) / len(env.agents)
             recorder.record(env.agents,
                             [(c["accel"], c["steering"]) for c in info["selected_controls"]],
-                            env._collision_pairs)
+                            env._collision_pairs, proposed_controls=info.get("proposed_controls"))
             flips += int(info.get("control_flips", 0))
             decisions += int(info.get("control_decisions", 0))
         metrics.append(float(env.rollout_metric()))
@@ -771,7 +779,7 @@ def evaluate_deterministic(
                    "mean_travel_time_s", "mean_capped_travel_time_s", "mean_speed_mps",
                    "speed_std_mps", "mean_abs_accel", "rms_jerk", "mean_abs_steering",
                    "mean_abs_lateral_m", "min_clearance_m", "wall_time_per_agent_step_ms",
-                   "closed_loop_score")
+                   "closed_loop_score", "shield_intervention_rate")
     shared_metrics = {}
     for key in metric_keys:
         values = [row[key] for row in episodes if np.isfinite(row[key])]
@@ -899,33 +907,14 @@ def _persist_curve(path: Path | None, rows: list[dict[str, float]]) -> None:
     _plot_curve(path, rows)
 
 
-def _validation_score(stats: dict[str, float]) -> tuple[float, ...]:
-    """Rank by NAVSIM-style closed-loop score, then leftover task terms."""
-    from RL.closed_loop_score import closed_loop_score
-    pdms = float(stats["closed_loop_score"]) if "closed_loop_score" in stats else closed_loop_score(stats)
-    return (-pdms,
-            stats.get("collision_events", stats["collisions"]),
-            stats["collisions"], -stats["arrival_rate"], stats["metric"])
+from RL.experiment_protocol import (validation_score as _validation_score,
+    regressions as validation_regressions, SAFETY_KEYS, SELECTION_RULE, TrainingBudget)
+
+VALIDATION_OBJECTIVES = {key: -1 for key in SAFETY_KEYS}
 
 
-# Hard safety non-regression vs the utility prior. Comfort and TTC enter the
-# PDMS weighted average instead of vetoing a safer, more complete policy.
-VALIDATION_OBJECTIVES = {
-    "collision_events": -1, "collisions": -1, "offroad_rate": -1,
-}
-
-
-def validation_regressions(candidate, prior) -> list[str]:
-    """Expose each hard safety objective that fails the matched comparison."""
-    return [key for key, direction in VALIDATION_OBJECTIVES.items()
-            if key in prior and (key not in candidate or not np.isfinite(candidate[key])
-                                 or direction * (candidate[key] - prior[key]) < -1e-8)]
-
-
-def _validation_improves(candidate, incumbent, prior) -> bool:
-    """Safety non-regression vs utility, then higher closed-loop score than incumbent."""
-    return (not validation_regressions(candidate, prior)
-            and _validation_score(candidate) < _validation_score(incumbent))
+def _validation_improves(candidate, incumbent, prior):
+    return not validation_regressions(candidate, prior) and _validation_score(candidate) < _validation_score(incumbent)
 
 
 def experiment_seeds(args):
@@ -936,7 +925,8 @@ def experiment_seeds(args):
             raise ValueError(f"{key} must be positive")
     if args.episodes_per_update >= 1000:
         raise ValueError("episodes_per_update must be below the 1000-seed update stride")
-    training = [[int(args.seed + update * 1000 + ep)
+    from RL.experiment_protocol import training_seed
+    training = [[training_seed(args, update, ep)
                  for ep in range(args.episodes_per_update)]
                 for update in range(1, args.updates + 1)]
     validation = list(range(int(getattr(args, "validation_seed_start", 910_000)),
@@ -985,6 +975,9 @@ def _training_fingerprint(args):
     sources += [root / "Baselines" / name for name in ("runner.py", "metrics.py", "scenario.py")]
     if args.calibration is not None:
         sources.append(Path(args.calibration))
+    if getattr(args, 'calibration', None) is not None and Path(args.calibration).name == 'utility_calibration_tgsim.json':
+        sources += sorted((root/'TGSIM Case').glob('*.py'))
+        sources.append(root/'data/TGSIM FB/derived_boundaries/street_boundaries.csv')
     digest = hashlib.sha256()
     for source in sources:
         digest.update(source.name.encode())
@@ -993,11 +986,15 @@ def _training_fingerprint(args):
 
 
 def _checkpoint_metadata(args, env, policy):
+    from RL.experiment_protocol import validation_config
     return {
         "protocol_version": 3, "spawn_protocol_version": SPAWN_PROTOCOL_VERSION,
         "training_revision": TRAINING_REVISION, "collision_filter_revision": 2,
         "driving_reward_revision": DRIVING_REWARD_REVISION,
-        "selection_rule": "pdms_safety_non_regression",
+        "selection_rule": SELECTION_RULE,
+        "validation_config": validation_config(args, env.config.sim_config, env.config.base_params),
+        "decision_protocol_version": 1,
+        "training_seed_rule": "10000000 + seed + update*1000 + episode",
         "validation_objectives": VALIDATION_OBJECTIVES,
         "obs_dim": env.obs_dim, "hidden_dim": args.hidden_dim,
         "residual_scale": policy.residual_scale,
@@ -1024,6 +1021,8 @@ def _checkpoint_metadata(args, env, policy):
 
 def train(args: argparse.Namespace) -> None:
     train_seeds, val_seeds, test_seeds = experiment_seeds(args)
+    from RL.experiment_protocol import source_manifest
+    sources = source_manifest()
     fingerprint = _training_fingerprint(args)
     resumed = None
     if getattr(args, "resume", None) is not None:
@@ -1054,6 +1053,8 @@ def train(args: argparse.Namespace) -> None:
         candidate_temperature=float(getattr(args, "candidate_temperature", 0.005)),
     )
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
+    budget = TrainingBudget(args, resumed.get("budget") if resumed else None)
+    budget.watch(optimizer)
 
     if args.calibration is not None:
         print(f"Using {args.prefer_params} utility params from {args.calibration}")
@@ -1097,6 +1098,7 @@ def train(args: argparse.Namespace) -> None:
              "clip_frac": float("nan"), "entropy": float("nan"), "value_loss": float("nan")},
         )
     ]
+    curve_rows[0].update(environment_steps=0, active_agent_transitions=0, optimizer_steps=0)
     if resumed is None:
         _persist_curve(curve_path, curve_rows)
 
@@ -1124,12 +1126,13 @@ def train(args: argparse.Namespace) -> None:
 
     def selected_checkpoint(update, *, policy_test=None, prior_test=None):
         blob = _checkpoint_metadata(args, probe_env, policy)
-        blob.update(state_dict=best_state, selected_update=best_update, updates=update,
+        blob.update(state_dict=best_state, selected_update=best_update, updates=update, source_hashes=sources,
                     selection_status="utility_fallback" if best_update == 0 else "learned_residual",
                     evaluation_status="validation_only" if policy_test is None else "test_complete",
                     val_seeds=val_seeds, test_seeds=test_seeds, train_scenario_seeds=train_seeds,
                     validation=best_val, prior_validation=prior_val,
-                    validation_history=validation_history)
+                    validation_history=validation_history, budget=budget.state(),
+                    stopping_reason="environment_budget" if budget.exhausted else "update_limit")
         reports = {"val": best_val, "prior_val": prior_val}
         if policy_test is not None:
             blob.update(test=policy_test, prior_test=prior_test)
@@ -1149,7 +1152,7 @@ def train(args: argparse.Namespace) -> None:
             "state_dict": policy.state_dict(), "optimizer": optimizer.state_dict(),
             "best_state": best_state, "best_val": best_val, "best_update": best_update,
             "best_metric": best_metric, "prior_val": prior_val, "curve_rows": curve_rows,
-            "validation_history": validation_history,
+            "validation_history": validation_history, "budget": budget.state(),
             "torch_rng": torch.get_rng_state(), "numpy_rng": np.random.get_state(),
             "complete": complete,
         }
@@ -1161,7 +1164,12 @@ def train(args: argparse.Namespace) -> None:
 
     if resumed is None:
         save_progress(0)
+    completed_update = start_update-1
     for update in range(start_update, args.updates + 1):
+        pending_resume = resumed is not None and resumed["pending_evaluation"] and update == resumed["update"]
+        if budget.exhausted and not pending_resume:
+            break
+        completed_update = update
         if args.anneal_lr:
             frac = 1.0 - (update - 1) / max(args.updates, 1)
             for group in optimizer.param_groups:
@@ -1172,8 +1180,11 @@ def train(args: argparse.Namespace) -> None:
         else:
             env = make_env(args, seed=train_seeds[update - 1][0])
             memory, metrics, collisions, realism, aux = collect_rollouts(
-                env, policy, args.episodes_per_update, episode_seeds=train_seeds[update - 1], gamma=args.gamma)
-        stats = ppo_update(
+                env, policy, args.episodes_per_update, episode_seeds=train_seeds[update - 1], gamma=args.gamma,
+                max_env_steps=budget.remaining(args.max_steps*args.episodes_per_update))
+            budget.add(aux["environment_steps"], aux["active_agent_transitions"])
+            budget.updates = update
+            stats = ppo_update(
                 policy, optimizer, memory, gamma=args.gamma, gae_lambda=args.gae_lambda,
                 clip_coef=args.clip_coef, value_coef=args.value_coef, entropy_coef=args.entropy_coef,
                 epochs=args.ppo_epochs, minibatch_size=args.minibatch_size, target_kl=args.target_kl)
@@ -1185,11 +1196,11 @@ def train(args: argparse.Namespace) -> None:
         save_progress(update, pending=True, diagnostics=(metrics, collisions, realism, aux, stats))
 
         val_note = ""
-        if update % val_every == 0 or update == args.updates:
+        if budget.validation_due(args, update):
             val = evaluate_deterministic(args, policy, val_seeds, obb_safety_filter=True,
                                          label=f"Validation update {update}")
             val["regressions_vs_utility"] = validation_regressions(val, prior_val)
-            validation_history.append({"update": update, **val})
+            validation_history.append({"update": update, **budget.state(), **val})
             if val["regressions_vs_utility"]:
                 print("Validation regressions vs utility: " + ", ".join(val["regressions_vs_utility"]), flush=True)
             if _validation_improves(val, best_val, prior_val):
@@ -1208,7 +1219,9 @@ def train(args: argparse.Namespace) -> None:
                 f" | flip={val['control_flip_rate']:5.3f}"
                 f" | train_flip={aux['control_flip_rate']:5.3f}"
             )
-            curve_rows.append(_curve_row(update, mean_metric, val, prior_val, stats))
+            row = _curve_row(update, mean_metric, val, prior_val, stats)
+            row.update(environment_steps=budget.env_steps, active_agent_transitions=budget.agent_steps, optimizer_steps=budget.optimizer_steps)
+            curve_rows.append(row)
             _persist_curve(curve_path, curve_rows)
 
         log_every = args.log_every if args.log_every > 0 else max(min(args.updates // 10, 10), 1)
@@ -1232,7 +1245,7 @@ def train(args: argparse.Namespace) -> None:
         print(f"Wrote learning curve to {curve_path} and {curve_path.with_suffix('.png')}")
 
     if getattr(args, "skip_test", False):
-        save_progress(args.updates, complete=True)
+        save_progress(completed_update, complete=True)
         print(f"Development run complete; selected update {best_update} "
               f"({'utility fallback' if best_update == 0 else 'learned residual'}); "
               "held-out test was not evaluated.")
@@ -1240,13 +1253,13 @@ def train(args: argparse.Namespace) -> None:
 
     # Keep the latest optimizer/actor paired in the resumable state.
     latest_state = copy.deepcopy(policy.state_dict())
-        if best_state is not None:
-            policy.load_state_dict(best_state)
+    if best_state is not None:
+        policy.load_state_dict(best_state)
 
     # Honest report: the test seeds never took part in selection.
     prior_test = evaluate_deterministic(args, None, test_seeds, obb_safety_filter=True, label="Prior test")
     policy_test = evaluate_deterministic(args, policy, test_seeds, obb_safety_filter=True, label="Selected policy test")
-        print(
+    print(
         f"Held-out TEST ({len(test_seeds)} episodes, never used for selection): "
         f"metric={policy_test['metric']:.3f} (prior {prior_test['metric']:.3f}) | "
         f"arrival={policy_test['arrival_rate']:.3f} (prior {prior_test['arrival_rate']:.3f}) | "
@@ -1264,9 +1277,9 @@ def train(args: argparse.Namespace) -> None:
         )
 
     if args.save is not None:
-        _export_checkpoint(selected_checkpoint(args.updates, policy_test=policy_test, prior_test=prior_test), args.save)
+        _export_checkpoint(selected_checkpoint(completed_update, policy_test=policy_test, prior_test=prior_test), args.save)
         policy.load_state_dict(latest_state)
-        save_progress(args.updates, complete=True)
+        save_progress(completed_update, complete=True)
         if best_val is None:
             print(f"Saved PPO residual policy to {args.save}")
         else:
@@ -1275,11 +1288,13 @@ def train(args: argparse.Namespace) -> None:
                 f"val metric={best_val['metric']:.3f} vs prior {prior_val['metric']:.3f}, "
                 f"val arrival={best_val['arrival_rate']:.3f} vs prior "
                 f"{prior_val['arrival_rate']:.3f}, val collisions={best_val['collisions']:.2f})"
-        )
+            )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train residual MARL policy with PPO")
+    from RL.experiment_protocol import add_budget_args
+    add_budget_args(parser)
     parser.add_argument("--updates", type=int, default=100)
     parser.add_argument("--episodes-per-update", type=int, default=4)
     parser.add_argument("--num-agents", type=int, default=10)

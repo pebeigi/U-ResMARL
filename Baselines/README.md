@@ -127,14 +127,17 @@ New checkpoints go to `RL/checkpoints/v3/` and `Baselines/checkpoints/v3/`;
 new results go to `Baselines/results/v3/`. Evaluation rejects incompatible
 checkpoints and requires every requested training seed.
 
-Training and evaluation share synchronous movement, pre-transition driving
+For the current reviewer-fairness protocol, use [FAIR_COMPARISON.md](FAIR_COMPARISON.md).
+The historical rerun commands below are not a convergence or matched-budget protocol.
+
+Training and evaluation share synchronous movement, post-transition driving
 rewards, arrival bonuses, and collision accounting in `RL/transition.py`.
 PPO returns follow each agent separately, terminate on arrival, and bootstrap
-at time limits. The paper trainers use collision penalty 8, filter off during
-training, filter on for validation and evaluation, and safety-first checkpoint
-selection on held-out validation scenarios. Test scores do not select weights.
-The legacy continuous baseline defaults to collision penalty 0; set it explicitly
-when making a reward-matched comparison.
+at time limits. Current online trainers default to duration penalty 0, terminal
+contact penalty 1, and filtering enabled during training and evaluation. They
+share safety feasibility and PDMS checkpoint selection on held-out validation
+scenarios. Test scores do not select weights. Match reward and filter flags
+explicitly when using historical launchers.
 
 `residual_param` trains a separate parameter-residual policy. Its weights-only
 and sigma-only variants mask that policy at inference: these measure sensitivity
@@ -167,7 +170,7 @@ team mean for their cooperative objective. Shared infrastructure:
 | Initial conditions (positions, speeds, destinations) | `scenario.py` — generated once per seed from `RL.traffic_env` spawn logic |
 | Kinematic bicycle integrator, observations, reward | `dynamics.py` |
 | Rollout loop, oriented-box collisions, arrival rule | `runner.py` |
-| Shared OBB safety filter (1.5 s / 4-substep lookahead) | `utility_model.sanitize_control_command` via `RL.transition.advance_agents` — applied to **every** controller in `runner.py` at evaluation; off during training by default |
+| Shared OBB safety filter (1.5 s / 4-substep lookahead) | `utility_model.sanitize_control_command` via `RL.transition.advance_agents` — applied to **every** controller in `runner.py` at evaluation; on during training by default |
 | Safety / efficiency / comfort metrics | `metrics.py` |
 | Distributional realism vs. measured data | `realism.py` |
 

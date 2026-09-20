@@ -146,6 +146,9 @@ def rollout_metrics(result: RolloutResult) -> dict[str, Any]:
         "episode_time_s": steps * dt,
         # Safety
         "collision_events": result.collision_events,
+        "shield_interventions": result.extra.get("shield_interventions", 0),
+        "shield_intervention_rate": result.extra.get("shield_intervention_rate", float("nan")),
+        "decision_protocol_version": result.extra.get("decision_protocol_version", 0),
         "collision_steps": result.collision_steps,
         "collision_rate_per_agent": len(result.colliding_agents) / n,
         "collision_free": float(result.collision_events == 0),
@@ -183,6 +186,7 @@ def metrics_frame(results: list[RolloutResult]) -> pd.DataFrame:
 
 
 AGGREGATE_COLUMNS = [
+    "shield_intervention_rate",
     "closed_loop_score",
     "collision_events",
     "collision_rate_per_agent",

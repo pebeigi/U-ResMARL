@@ -1,7 +1,7 @@
-"""Two-day paper sprint: train core models, then sparse benchmark.
+"""Train residual / ΔΘ / matched RL, then sparse + ablation + stress benchmarks.
 
-Fits ~48h wall-clock with --jobs 2 on one machine. Not the full ICLR package
-(no residual_param/nominal, no-lookahead, or dense stress).
+24 PPO updates, seeds 0/1/2, 20 scenes, 10 agents, 240 steps, shared
+decision/OBB protocol (16 val episodes every 10 updates).
 
     python -u -m Baselines._run_2day_pipeline
     python -u -m Baselines._run_2day_pipeline --skip-train
@@ -24,7 +24,7 @@ LOG_DIR = Path("RL/logs/revision6/paper_2day")
 PIPELINE_LOG = LOG_DIR / "pipeline.log"
 BENCH_OUT = Path("Baselines/results/revision6/paper_2day")
 
-# Same CaRL/PDMS recipe as the 4h diagnostic that selected a learned residual.
+# Matched paper recipe under the shared decision/OBB/selection protocol.
 TRAIN_FWD = [
     "--updates", "24",
     "--max-steps", "240",
@@ -33,12 +33,14 @@ TRAIN_FWD = [
     "--collision-penalty", "0",
     "--collision-event-penalty", "1",
     "--gamma", "0.95",
-    "--val-every", "6",
-    "--val-episodes", "8",
+    "--val-every", "10",
+    "--val-episodes", "16",
+    "--test-episodes", "16",
     "--log-every", "1",
+    "--skip-test",
 ]
 
-TRAIN_MODELS = ["residual_marl", "direct_discrete_rl", "mappo"]
+TRAIN_MODELS = ["residual_marl", "residual_param", "direct_discrete_rl", "mappo"]
 
 BENCH_MODELS = [
     "orca",
@@ -50,7 +52,21 @@ BENCH_MODELS = [
     "direct_discrete_rl",
     "mappo",
     "residual_marl",
+    "ctrl_sim",
+    "ctg_plus_plus",
 ]
+
+PARAM_EVAL_MODELS = [
+    "utility_pt",
+    "residual_marl",
+    "residual_param",
+    "residual_weights_only",
+    "residual_sigma_only",
+    "direct_discrete_rl",
+    "mappo",
+]
+PARAM_OUT = Path("Baselines/results/revision6/param_lookahead_stress")
+GATE_OUT = Path("Baselines/results/revision6/gate_ablation")
 
 
 def log(msg: str) -> None:
@@ -103,11 +119,11 @@ def main() -> None:
                 cmd.append("--overwrite")
             cmd.extend(["--", *TRAIN_FWD])
             if model == "residual_marl":
-                cmd.extend(["--residual-mode", "candidate_logits", "--skip-test"])
+                cmd.extend(["--residual-mode", "candidate_logits"])
+            elif model == "residual_param":
+                cmd.extend(["--residual-mode", "param_delta"])
             elif model == "direct_discrete_rl":
-                cmd.extend(["--minibatch-size", "512", "--skip-test"])
-            elif model == "mappo":
-                cmd.extend(["--skip-test"])
+                cmd.extend(["--minibatch-size", "512"])
             run(cmd, f"train {model}")
 
     if not args.skip_benchmark:
@@ -121,8 +137,40 @@ def main() -> None:
                 "--train-seeds", *seed_args,
                 "--output-dir", str(BENCH_OUT),
                 "--n-boot", "5000",
+                "--conflict-lookahead", "full",
             ],
             "sparse benchmark",
+        )
+        run(
+            [
+                py, "-u", "-m", "Baselines.ablation_stress",
+                "--mode", "both",
+                "--lookahead", "both",
+                "--models", *PARAM_EVAL_MODELS,
+                "--scenarios", str(args.scenarios),
+                "--stress-scenarios", str(args.scenarios),
+                "--num-agents", "10",
+                "--stress-agents", "16",
+                "--max-steps", "240",
+                "--train-seeds", *seed_args,
+                "--n-boot", "5000",
+                "--output-dir", str(PARAM_OUT),
+            ],
+            "param / no-lookahead / dense stress",
+        )
+        run(
+            [
+                py, "-u", "-m", "Baselines.ablation_stress",
+                "--mode", "gate",
+                "--lookahead", "full",
+                "--scenarios", str(args.scenarios),
+                "--num-agents", "10",
+                "--max-steps", "240",
+                "--train-seeds", *seed_args,
+                "--n-boot", "5000",
+                "--output-dir", str(GATE_OUT),
+            ],
+            "gate ablation",
         )
     log("2-day pipeline complete")
 

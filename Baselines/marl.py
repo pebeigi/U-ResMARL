@@ -58,7 +58,9 @@ def agent_features(agents: list[TrafficAgent], scenario: "Scenario") -> np.ndarr
     max_speed = float(scenario.sim_config.get("max_agent_speed", 16.0))
     out = np.zeros((len(agents), FEATURES_PER_AGENT), dtype=np.float32)
     for i, agent in enumerate(agents):
-        station, lateral, _, _, _ = project_and_clearances(scenario.corridor, agent.pos)
+        from RL.routing import agent_route, agent_station
+        _, lateral, _, _, _ = project_and_clearances(agent_route(scenario.corridor, agent), agent.pos)
+        station = agent_station(scenario.corridor, agent)
         out[i] = (
             station / corridor_length,
             lateral,
@@ -217,6 +219,8 @@ def load_marl_policy(checkpoint: Path, obs_dim: int) -> MARLPolicy:
             f"python -m Baselines.train_marl --algo {blob.get('algo', 'mappo')}"
         ) from exc
     policy.eval()
+    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 
 

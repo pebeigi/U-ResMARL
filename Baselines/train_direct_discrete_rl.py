@@ -131,22 +131,17 @@ def train(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adam(policy.parameters(), lr=args.lr)
 
     selection = PolicySelection(args, policy, "direct_discrete_rl")
+    selection.budget.watch(optimizer)
     best_reward = -float("inf")
     for update in range(1, args.updates + 1):
+        if selection.budget.exhausted:
+            break
         if getattr(args, "anneal_lr", True):
             for group in optimizer.param_groups:
                 group["lr"] = args.lr * (1.0 - (update - 1) / max(args.updates, 1))
         memory = PPOMemory()
         episode_stats: list[dict[str, float]] = []
-        for _ in range(args.episodes_per_update):
-            scenario = build_scenario(
-                seed=int(rng.integers(10_000_000, 2_000_000_000)),
-                num_agents=args.num_agents,
-                max_steps=args.max_steps,
-                run_id=args.run_id,
-                lane_kf=args.lane_kf,
-                obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
-            )
+        for scenario in selection.training_scenarios(update):
             episode_stats.append(
                 run_episode(
                     scenario, policy, memory,
@@ -155,7 +150,10 @@ def train(args: argparse.Namespace) -> None:
                 )
             )
 
+            selection.budget.add(episode_stats[-1]["steps"], episode_stats[-1]["agent_steps"])
+
         stats = ppo_update(policy, optimizer, memory, args)
+        selection.budget.updates = update
         selection.consider(update)
         mean_reward = float(np.mean([s["reward"] for s in episode_stats]))
         best_reward = max(best_reward, mean_reward)

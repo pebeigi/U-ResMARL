@@ -76,6 +76,9 @@ def feasible_action_mask(
 ) -> np.ndarray:
     """Boolean mask over the fixed (accel, steering) grid with OBB conflict rejection."""
     sim_config = scenario.sim_config
+    from RL.decision import local_agents
+    agents = local_agents(agents, agent_idx, sim_config)
+    agent_idx = 0
     n = num_grid_actions(sim_config)
     from RL.boundary import candidate_boundary_safe, BoundaryInfeasibleError
     mask = np.zeros(n, dtype=bool)

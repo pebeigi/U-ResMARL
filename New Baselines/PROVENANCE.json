@@ -1,0 +1,60 @@
+{
+  "ctrl_sim": {
+    "url": "https://github.com/montrealrobotics/ctrl-sim",
+    "commit": "4c3ffa260f9e39b7c930614612bae01f0f85cd0f",
+    "license": "MIT",
+    "files": [
+      {
+        "source": "modules/encoder.py",
+        "sha256": "47ca80a6b1459122ce9240868b4813b69299bbc88a6f410107749110fdeae8a9",
+        "vendored": "encoder.py"
+      },
+      {
+        "source": "modules/decoder.py",
+        "sha256": "be1abdec6b4b93a78f5bab6226d437939477d9bf5396fb769fc32b5cd6ec1327",
+        "vendored": "decoder.py"
+      },
+      {
+        "source": "modules/map_encoder.py",
+        "sha256": "d38573c15b382b6e88228bccf117063c6f8a6c5d78bc5689e2645bff5b532d28",
+        "vendored": "map_encoder.py"
+      },
+      {
+        "source": "modules/ctg_arch.py",
+        "sha256": "d06c9ae855c9c2a70fcd2cccfc21815a00b6fcb7d69fdd0535aa57c771cbaf75",
+        "vendored": "ctg_arch.py"
+      },
+      {
+        "source": "utils/layers.py",
+        "sha256": "b04477226aef83606c2c15dab5f3cca51856bdf564d1e08883ab1572a50776a3",
+        "vendored": "layers.py"
+      },
+      {
+        "source": "utils/train_utils.py",
+        "sha256": "c0c84c7850e7995a037adce55649f4e0d64b07fa94b1acc1c17e7cb867260463",
+        "vendored": "train_utils.py"
+      },
+      {
+        "source": "utils/diffusion_helpers.py",
+        "sha256": "f7b9683984c35f6b0817c5c3a414f51dfae6d75fac3f9e926c6316217de9d2d1",
+        "vendored": "sinusoidal.py",
+        "extraction": "SinusoidalPosEmb class only"
+      }
+    ],
+    "hash_format": "SHA256 of UTF-8 source with LF newlines"
+  },
+  "ctg_reference": {
+    "url": "https://github.com/NVlabs/CTG",
+    "commit": "f916c008c3ecf2360bfa050639606eaab7c207f5",
+    "license": "NVIDIA non-commercial research/evaluation",
+    "note": "Inspected reference only; no NVIDIA source copied. CTG++ core comes from the CtRL-Sim authors reimplementation."
+  },
+  "changes": [
+    "Package-relative imports; isolated from Nocturne and Lightning.",
+    "Dense equivalent of relative social graph attention, without torch_geometric.",
+    "Local data, training, DDPM and simulator adapters are separate from the vendored architecture.",
+    "Relative velocity encoding corrected to rotated velocity differences.",
+    "Reverse diffusion uses every consecutive DDPM step; optional guidance supplied by the local bicycle adapter.",
+    "Clone temporal padding mask before inserting its all-padding sentinel; preserve social existence mask."
+  ]
+}

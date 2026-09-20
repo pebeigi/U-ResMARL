@@ -126,6 +126,8 @@ def load_pure_rl_policy(checkpoint: Path, obs_dim: int) -> PureRLPolicy:
             f"Retrain it with: python -m Baselines.train_pure_rl --save {checkpoint}"
         ) from exc
     policy.eval()
+    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 
 

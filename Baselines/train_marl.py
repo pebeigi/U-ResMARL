@@ -562,25 +562,20 @@ def train(args: argparse.Namespace) -> None:
     )
 
     selection = PolicySelection(args, policy, args.algo)
+    for opt in [critic_optimizer, shared_optimizer]+actor_optimizers:
+        selection.budget.watch(opt)
     best_reward = -float("inf")
     best_collisions = float("inf")
     for update in range(1, args.updates + 1):
-        episodes = [
-            collect_episode(
-                build_scenario(
-                    seed=int(rng.integers(10_000_000, 2_000_000_000)),
-                    num_agents=args.num_agents,
-                    max_steps=args.max_steps,
-                    run_id=args.run_id,
-                    lane_kf=args.lane_kf,
-                    obb_safety_filter=bool(getattr(args, "train_obb_filter", True)),
-                ),
-                policy,
+        if selection.budget.exhausted:
+            break
+        episodes = []
+        for scenario in selection.training_scenarios(update):
+            episode = collect_episode(scenario, policy,
                 collision_penalty=args.collision_penalty,
-                collision_event_penalty=float(getattr(args, "collision_event_penalty", 0.0)),
-            )
-            for _ in range(args.episodes_per_update)
-        ]
+                collision_event_penalty=float(getattr(args, 'collision_event_penalty', 0.0)))
+            episodes.append(episode)
+            selection.budget.add(episode.stats['steps'], int(episode.masks.sum()))
         batch = build_batch(episodes, args.gamma, args.gae_lambda)
 
         if args.algo in SEQUENTIAL_ALGORITHMS:
@@ -601,6 +596,7 @@ def train(args: argparse.Namespace) -> None:
         mean_collisions = float(np.mean([e.stats["collisions"] for e in episodes]))
         best_reward = max(best_reward, mean_reward)
         best_collisions = min(best_collisions, mean_collisions)
+        selection.budget.updates = update
         selection.consider(update)
         if update == 1 or update % max(args.log_every, 1) == 0:
             print(

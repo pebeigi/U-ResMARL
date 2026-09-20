@@ -28,6 +28,11 @@ class CandidateContext:
 
 
 def candidate_context(index, agents, params, sim) -> CandidateContext:
+    # Resolve the calibrated site adapter at call time, like the utility selector.
+    from utility_model import evaluate_candidate_utility
+    from RL.decision import local_agents
+    agents = local_agents(agents, index, sim)
+    index = 0
     agent = agents[index]
     candidates = generate_candidate_actions(agent, sim["dt"], sim, dedupe=False)
     context = build_step_context(index, agent, agents, sim)

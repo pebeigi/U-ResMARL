@@ -62,7 +62,7 @@ class BaselineFixTests(unittest.TestCase):
         weights = truncnorm.pdf(samples, -4., 4.) / truncnorm.pdf(samples, -7.9, .1, loc=3.9)
         expected = float(weights @ samples / weights.sum())
         with patch.object(controller, "_rollout_cost", return_value=np.zeros(2)), \
-             patch("Baselines.mppi.sanitize_control", side_effect=lambda i, a, agents, c, s: c):
+             patch("RL.decision.control_feasible", return_value=True):
             actual = controller.compute_controls([agent], scenario, 0)[0][0]
         self.assertAlmostEqual(actual, expected, places=8)
 

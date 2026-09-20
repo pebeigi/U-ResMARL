@@ -231,10 +231,11 @@ class ExperimentTests(unittest.TestCase):
 
     def test_all_episode_seeds_are_disjoint(self):
         training, validation, test = experiment_seeds(settings(episodes_per_update=3))
-        self.assertEqual(training, [[1000, 1001, 1002], [2000, 2001, 2002]])
+        self.assertEqual(training, [[10001000, 10001001, 10001002], [10002000, 10002001, 10002002]])
         self.assertFalse(set(validation) & set(test))
-        for config in (settings(validation_seed_start=1001, episodes_per_update=2),
-                       settings(test_seed_start=2000), settings(updates=810),
+        experiment_seeds(settings(updates=2000))  # larger budgets stay outside evaluation blocks
+        for config in (settings(validation_seed_start=10001001, episodes_per_update=2),
+                       settings(test_seed_start=10002000),
                        settings(validation_seed_start=810000)):
             with self.assertRaises(ValueError):
                 experiment_seeds(config)
