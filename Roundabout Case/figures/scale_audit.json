@@ -1,49 +1,55 @@
 {
   "supplied_metres_per_pixel": 0.04354578,
+  "active_metres_per_pixel": 0.13063734,
+  "coordinate_factor": 3.0,
   "absolute_scale_verified": false,
   "curb_bounds": [
-    0.0,
-    1.5676,
-    55.6951,
-    31.3094
+    -65.0094,
+    -27.0054,
+    232.9335,
+    158.1867
   ],
   "trajectory_bounds": {
     "xloc_kf": [
-      0.073553211781901,
-      55.67059727004732
+      0.220659635345703,
+      167.01179181014194
     ],
     "yloc_kf": [
-      0.0795220840971585,
-      31.317093789481508
+      0.2385662522914755,
+      93.95128136844453
     ]
   },
-  "recorded_centres_inside_curb_fraction": 0.9998520491196923,
+  "recorded_centres_inside_curb_fraction": 0.9730665071370218,
+  "recorded_ego_centres_inside_curb_fraction": 0.9934369516999371,
+  "scene_only_centres_inside_curb_fraction": 0.9019896618441191,
   "recorded_box_quantiles": {
     "length_smoothed": {
-      "0.05": 0.7899560516634875,
-      "0.5": 1.0403006710307927,
-      "0.95": 1.7938722378427925
+      "0.05": 2.3698681549904625,
+      "0.5": 3.120902013092378,
+      "0.95": 5.381616713528377
     },
     "width_smoothed": {
-      "0.05": 1.1119393316322739,
-      "0.5": 1.804414496990116,
-      "0.95": 2.102046349741125
+      "0.05": 3.3358179948968223,
+      "0.5": 5.413243490970348,
+      "0.95": 6.3061390492233755
     }
   },
   "inferred_oriented_length_width": [
-    1.736111370077872,
-    0.6307312148084733
+    5.179127394596028,
+    1.8942720837563625
   ],
-  "box_fit_rmse": 0.20505983664543947,
+  "box_fit_rmse": 0.6394245241045204,
   "box_fit_note": "Hypothesis: width_smoothed is image x extent and length_smoothed is y extent; not physical ground truth.",
-  "recorded_speed_median": 1.7377713489350466,
-  "coordinate_difference_speed_median": 1.7375711331768973,
+  "recorded_speed_median": 5.21331404680514,
+  "coordinate_difference_speed_median": 5.212713399530695,
   "snapshot_time_s": 100.0,
   "plotted_vehicle_ids": [
+    2097,
+    2611,
     4597,
     6505,
-    7022,
-    7191
+    6848,
+    7022
   ],
-  "note": "A scale correction must transform curb, trajectories, dimensions, speeds and accelerations together, then refit the utility prior."
+  "note": "The active curb and prepared trajectories (positions, image boxes, speeds and accelerations) use 3x coordinates; calibration and simulator use 4.5 x 1.8 m cars."
 }

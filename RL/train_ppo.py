@@ -1398,12 +1398,12 @@ def main() -> None:
         "--calibration",
         type=Path,
         default=DEFAULT_CALIBRATION_PATH,
-        help="Calibration JSON; uses robust_params by default",
+        help="Calibration JSON; uses validation-selected working_params by default",
     )
     parser.add_argument(
         "--prefer-params",
-        choices=("robust", "best", "nominal"),
-        default="robust",
+        choices=("working", "robust", "best", "nominal"),
+        default="working",
         help="Which calibrated parameter set to freeze as the utility prior",
     )
     parser.add_argument(

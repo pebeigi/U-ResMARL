@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,7 +46,7 @@ def main():
     c.LOG_DIR.mkdir(parents=True, exist_ok=True)
     c.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     manifest = dict(
-        protocol="roundabout_recorded_initialization_v3",
+        protocol="roundabout_recorded_initialization_v4_3x",
         recipe="paper_2day",
         site="jounieh",
         created_utc=datetime.now(timezone.utc).isoformat(),
@@ -65,11 +66,30 @@ def main():
         vehicle_width_m=c.VEHICLE_WIDTH,
         vehicle_wheelbase_m=c.VEHICLE_WHEELBASE,
         source_hashes=source_manifest(),
+        trajectory_sha256=hashlib.sha256(c.TRAJECTORIES_CSV.read_bytes()).hexdigest(),
     )
     path = run / "run_manifest.json"
     if path.exists():
         previous = json.loads(path.read_text())
-        if previous["source_hashes"] != manifest["source_hashes"]:
+        for key in ("protocol", "recipe", "agents", "max_steps", "update_limit"):
+            if previous.get(key) != manifest.get(key):
+                raise ValueError("Run settings changed (%s); use a fresh run directory." % key)
+        if previous.get("trajectory_sha256") != manifest["trajectory_sha256"]:
+            raise ValueError("Roundabout prepared trajectories changed; use a fresh run directory and retrain.")
+        site_inputs = (
+            "Calibration/utility_calibration_jounieh.json",
+            "data/Lebanon_Jounieh/Jounieh_Road_Boundaries.csv",
+        )
+        old_hashes = previous.get("source_hashes", {})
+        new_hashes = manifest["source_hashes"]
+        changed_site_inputs = [name for name in site_inputs if old_hashes.get(name) != new_hashes.get(name)]
+        if changed_site_inputs:
+            raise ValueError(
+                "Roundabout calibration or curb changed since this run: "
+                + ", ".join(changed_site_inputs)
+                + ". Use a fresh run directory and retrain before benchmarking."
+            )
+        if previous["source_hashes"] != manifest["source_hashes"] and not args.resume:
             raise ValueError("Code changed since this run. Use a fresh run directory.")
     else:
         write_json(path, manifest)
@@ -171,7 +191,8 @@ def main():
             for name in c.TRAIN_MODELS:
                 for seed in c.SEEDS:
                     report = json.loads((c.CHECKPOINT_DIR / (STEMS[name] + "_seed" + str(seed) + ".summary.json")).read_text())
-                    if int(report.get("updates", 0)) < c.TRAIN_UPDATES:
+                    completed = int(report.get("updates") or (report.get("budget") or {}).get("policy_updates") or 0)
+                    if completed < c.TRAIN_UPDATES:
                         raise ValueError(name + " seed " + str(seed) + " did not reach the 2-day update budget")
         if args.command in ("newbaselines", "all"):
             launch("prepare_offline", ["prepare_new_baselines"])

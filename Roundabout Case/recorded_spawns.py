@@ -10,7 +10,7 @@ from functools import lru_cache
 import numpy as np
 import pandas as pd
 
-from config import TRAJECTORIES_CSV, BASE_DESIRED_SPEED
+from config import TRAJECTORIES_CSV, BASE_DESIRED_SPEED, MIN_RECORDED_GOAL_DISTANCE
 
 
 def split_for_seed(seed):
@@ -93,7 +93,7 @@ class RecordedSpawnPool:
             for row in group.iloc[rng.permutation(len(group))].itertuples():
                 pos = np.array([row.xloc_kf, row.yloc_kf])
                 goal = self.goals.get(int(row.id))
-                if goal is None or np.linalg.norm(goal - pos) < 5.0 or row.speed > sim["max_agent_speed"]:
+                if goal is None or np.linalg.norm(goal - pos) < MIN_RECORDED_GOAL_DISTANCE or row.speed > sim["max_agent_speed"]:
                     continue
                 key = (int(row.id), int(row.tick))
                 if key not in self._poses:

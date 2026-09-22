@@ -1,5 +1,6 @@
 """TGSIM Foggy Bottom closed-loop protocol (isolated from the freeway case)."""
 from pathlib import Path
+import json
 import os
 
 CASE_ROOT = Path(__file__).resolve().parent
@@ -16,6 +17,13 @@ RESULT_DIR = RUN_ROOT / "results"
 LOG_DIR = RUN_ROOT / "logs"
 NEW_BASELINE_DATA = RUN_ROOT / "data"
 NEW_BASELINE_RESULT_DIR = RESULT_DIR / "new_baselines"
+
+_CALIBRATION_METADATA = json.loads(CALIBRATION.read_text(encoding="utf-8"))
+_CALIBRATION_VEHICLE = _CALIBRATION_METADATA["calibration_vehicle"]
+VEHICLE_LENGTH = float(_CALIBRATION_VEHICLE["vehicle_length"])
+VEHICLE_WIDTH = float(_CALIBRATION_VEHICLE["vehicle_width"])
+VEHICLE_WHEELBASE = float(_CALIBRATION_VEHICLE["wheelbase"])
+MAX_AGENT_SPEED = float(_CALIBRATION_METADATA["max_agent_speed"])
 
 # Network curb geometry from TGSIM calibration. Lanes / PCA tubes are unused.
 NUM_AGENTS = 6
@@ -54,7 +62,6 @@ BENCH_MODELS = (
     "mappo",
     "residual_marl",
     "ctrl_sim",
-    "ctg_plus_plus",
 )
 PARAM_EVAL_MODELS = (
     "utility_pt",
@@ -65,7 +72,7 @@ PARAM_EVAL_MODELS = (
     "direct_discrete_rl",
     "mappo",
 )
-NEW_BASELINE_MODELS = ("ctrl_sim", "ctg_plus_plus")
+NEW_BASELINE_MODELS = ("ctrl_sim",)
 NEW_BASELINE_TRAIN_SCENES = 20
 NEW_BASELINE_VAL_SCENES = 6
 NEW_BASELINE_STEPS = 10000

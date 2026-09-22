@@ -1,0 +1,128 @@
+Loading trajectory data from C:\Users\Pedram\U-ResMARL\data\TGSIM FB\prepared\trajectories_calibration.csv...
+Ego class-id default for this site: 3.0
+Loaded 542850 ego rows (1688 ids) and 2492261 neighbor-scene rows.
+Site dest utility (on-road dir/dist to each ID dest; same U algebra as freeway) + curb: C:\Users\Pedram\U-ResMARL\data\TGSIM FB\derived_boundaries\street_boundaries.csv, v_max=14.51 m/s, actions=7×9=63.
+Building up to 2000 choice samples from 40000 candidate rows...
+  choice samples: 200/2000
+  choice samples: 400/2000
+  choice samples: 600/2000
+  choice samples: 800/2000
+  choice samples: 1000/2000
+  choice samples: 1200/2000
+  choice samples: 1400/2000
+  choice samples: 1600/2000
+  choice samples: 1800/2000
+  choice samples: 2000/2000
+Built 2000 choice samples.
+Prepared closed-loop windows (horizon=8 steps): 100 train / 40 val / 40 test from 1688 vehicle trajectories (disjoint vehicles per split).
+Global calibration (restart 1): scoring 400 random parameter sets on 2000 samples...
+  Global calibration (restart 1): 40/400 trials, best screen=1.0796
+  Global calibration (restart 1): 80/400 trials, best screen=1.0796
+  Global calibration (restart 1): 120/400 trials, best screen=1.0796
+  Global calibration (restart 1): 160/400 trials, best screen=1.0213
+  Global calibration (restart 1): 200/400 trials, best screen=1.0213
+  Global calibration (restart 1): 240/400 trials, best screen=1.0213
+  Global calibration (restart 1): 280/400 trials, best screen=0.9575
+  Global calibration (restart 1): 320/400 trials, best screen=0.9575
+  Global calibration (restart 1): 360/400 trials, best screen=0.9575
+  Global calibration (restart 1): 400/400 trials, best screen=0.9575
+Global calibration (restart 1): kept top 80 / 400 by one-step + tracking screen
+Restart 1: evaluating 80 candidates with 100 closed-loop windows x 8 steps...
+  restart 1: 8/80 candidates, this=2.5440 (rollout=1.4275), best=2.2455 (rollout=1.2809)
+  restart 1: 16/80 candidates, this=2.4599 (rollout=1.1758), best=2.2455 (rollout=1.2809)
+  restart 1: 24/80 candidates, this=2.7091 (rollout=1.3489), best=2.2455 (rollout=1.2809)
+  restart 1: 32/80 candidates, this=2.7910 (rollout=1.3309), best=2.2455 (rollout=1.2809)
+  restart 1: 40/80 candidates, this=2.7951 (rollout=1.2841), best=2.2455 (rollout=1.2809)
+  restart 1: 48/80 candidates, this=2.8138 (rollout=1.2429), best=2.2455 (rollout=1.2809)
+  restart 1: 56/80 candidates, this=2.8051 (rollout=1.1915), best=2.2455 (rollout=1.2809)
+  restart 1: 64/80 candidates, this=3.1487 (rollout=1.4970), best=2.2455 (rollout=1.2809)
+  restart 1: 72/80 candidates, this=3.0126 (rollout=1.2635), best=2.2455 (rollout=1.2809)
+  restart 1: 80/80 candidates, this=3.0721 (rollout=1.2722), best=2.2455 (rollout=1.2809)
+Global calibration (restart 2): scoring 400 random parameter sets on 2000 samples...
+  Global calibration (restart 2): 40/400 trials, best screen=1.1787
+  Global calibration (restart 2): 80/400 trials, best screen=0.9699
+  Global calibration (restart 2): 120/400 trials, best screen=0.9699
+  Global calibration (restart 2): 160/400 trials, best screen=0.9699
+  Global calibration (restart 2): 200/400 trials, best screen=0.9699
+  Global calibration (restart 2): 240/400 trials, best screen=0.8633
+  Global calibration (restart 2): 280/400 trials, best screen=0.8633
+  Global calibration (restart 2): 320/400 trials, best screen=0.8633
+  Global calibration (restart 2): 360/400 trials, best screen=0.8633
+  Global calibration (restart 2): 400/400 trials, best screen=0.8633
+Global calibration (restart 2): kept top 80 / 400 by one-step + tracking screen
+Restart 2: evaluating 80 candidates with 100 closed-loop windows x 8 steps...
+  restart 2: 8/80 candidates, this=2.3960 (rollout=1.2866), best=2.1735 (rollout=1.3101)
+  restart 2: 16/80 candidates, this=2.6882 (rollout=1.4545), best=2.1735 (rollout=1.3101)
+  restart 2: 24/80 candidates, this=2.6532 (rollout=1.2704), best=2.1735 (rollout=1.3101)
+  restart 2: 32/80 candidates, this=2.7080 (rollout=1.2597), best=2.1735 (rollout=1.3101)
+  restart 2: 40/80 candidates, this=2.8855 (rollout=1.4129), best=2.1735 (rollout=1.3101)
+  restart 2: 48/80 candidates, this=2.7725 (rollout=1.2434), best=2.1735 (rollout=1.3101)
+  restart 2: 56/80 candidates, this=2.9002 (rollout=1.2713), best=2.1735 (rollout=1.3101)
+  restart 2: 64/80 candidates, this=2.9907 (rollout=1.2980), best=2.1735 (rollout=1.3101)
+  restart 2: 72/80 candidates, this=3.2439 (rollout=1.4613), best=2.1735 (rollout=1.3101)
+  restart 2: 80/80 candidates, this=3.2017 (rollout=1.3593), best=2.1735 (rollout=1.3101)
+Global calibration (restart 3): scoring 400 random parameter sets on 2000 samples...
+  Global calibration (restart 3): 40/400 trials, best screen=1.2654
+  Global calibration (restart 3): 80/400 trials, best screen=0.9270
+  Global calibration (restart 3): 120/400 trials, best screen=0.9270
+  Global calibration (restart 3): 160/400 trials, best screen=0.9270
+  Global calibration (restart 3): 200/400 trials, best screen=0.9270
+  Global calibration (restart 3): 240/400 trials, best screen=0.9270
+  Global calibration (restart 3): 280/400 trials, best screen=0.9270
+  Global calibration (restart 3): 320/400 trials, best screen=0.9270
+  Global calibration (restart 3): 360/400 trials, best screen=0.9270
+  Global calibration (restart 3): 400/400 trials, best screen=0.9270
+Global calibration (restart 3): kept top 80 / 400 by one-step + tracking screen
+Restart 3: evaluating 80 candidates with 100 closed-loop windows x 8 steps...
+  restart 3: 8/80 candidates, this=2.3837 (rollout=1.2306), best=2.2924 (rollout=1.3653)
+  restart 3: 16/80 candidates, this=2.7424 (rollout=1.3889), best=2.2924 (rollout=1.3653)
+  restart 3: 24/80 candidates, this=2.7726 (rollout=1.3640), best=2.2924 (rollout=1.3653)
+  restart 3: 32/80 candidates, this=2.7392 (rollout=1.2544), best=2.2924 (rollout=1.3653)
+  restart 3: 40/80 candidates, this=2.8552 (rollout=1.3105), best=2.2924 (rollout=1.3653)
+  restart 3: 48/80 candidates, this=2.9270 (rollout=1.3309), best=2.2924 (rollout=1.3653)
+  restart 3: 56/80 candidates, this=2.9608 (rollout=1.3038), best=2.2924 (rollout=1.3653)
+  restart 3: 64/80 candidates, this=2.9644 (rollout=1.2585), best=2.2924 (rollout=1.3653)
+  restart 3: 72/80 candidates, this=3.0837 (rollout=1.2996), best=2.2924 (rollout=1.3653)
+  restart 3: 80/80 candidates, this=3.2374 (rollout=1.4039), best=2.2924 (rollout=1.3653)
+Identifiability: near-optimal=3/240, obj_range_rel=0.0442, verdict=weakly_identified
+Robust params objective=2.2721 (best=2.1735)
+Global calibration finished.
+Wrote C:\Users\Pedram\U-ResMARL\Calibration\runs\recalibration_20260922_p99\utility_calibration_tgsim.json
+Best objective: 2.1735
+Robust objective: 2.2721
+Best closed-loop loss (train): 1.3101
+Robust closed-loop loss (train): 1.3243
+Validation closed-loop loss: best=1.0485, robust=1.0332
+Working params: robust_selected_on_validation_windows
+Test closed-loop loss: 1.2413
+Validation spread over top trials: n=10, min=1.0088, p50=1.0589, max=1.1972, std=0.0692
+Window split: 100/40/40 windows from 1013/338/337 vehicles
+Best mean target rank: 27.68
+Best NLL: 4.2393
+Identifiability: near-optimal=3/240, obj_range_rel=0.0442, verdict=weakly_identified
+Working params (robust median of near-optimal trials):
+  S_theta: 4.1265
+  S_v: 2.5163
+  xi_i: 4.5802
+  S_d: 8.7763
+  gamma: 0.7975
+  w_x: 0.5597
+  w_y: 2.4538
+  w_c: 3.2620
+  w_ell: 24.1166
+  beta: 4.0768
+  sigma_long: 4.0341
+  sigma_lat: 1.2521
+Best params (single lowest objective):
+  S_theta: 3.9884
+  S_v: 2.5163
+  xi_i: 4.5802
+  S_d: 1.5290
+  gamma: 0.7975
+  w_x: 0.5597
+  w_y: 5.8540
+  w_c: 1.6119
+  w_ell: 2.4388
+  beta: 9.0524
+  sigma_long: 4.4737
+  sigma_lat: 1.2521

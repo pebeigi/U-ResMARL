@@ -57,15 +57,12 @@ PARAM_BOUNDS = {
     "beta": (0.01, 10.0),
     "sigma_long": (0.5, 5.0),
     "sigma_lat": (0.3, 2.5),
-    "w_ell": (0.1, 1000.0),
-    "beta": (0.01, 10.0),
-    "sigma_long": (0.5, 5.0),
-    "sigma_lat": (0.3, 2.5),
-    "w_ell": (0.1, 1000.0),
-    "beta": (0.01, 10.0),
-    "sigma_long": (0.5, 5.0),
-    "sigma_lat": (0.3, 2.5),
 }
+
+
+def search_bounds(result: dict) -> dict[str, tuple[float, float]]:
+    """New fits carry their actual site bounds; old archives used this legacy box."""
+    return {key: tuple(value) for key, value in result.get("search_bounds", PARAM_BOUNDS).items()}
 
 
 def latex_escape(text: str) -> str:
@@ -220,8 +217,9 @@ def robust_cloud_from_trials(tdf: pd.DataFrame, result: dict, k: int = 10) -> pd
 def plot_parameter_ranges_forest(result: dict, per_id: pd.DataFrame, out_dir: Path) -> None:
     ranges = result["recommended_ranges_from_top_trials"]
     best = result["best_params"]
-    small_keys = [k for k in PARAM_KEYS if PARAM_BOUNDS[k][1] <= 10.0]
-    large_keys = [k for k in PARAM_KEYS if PARAM_BOUNDS[k][1] > 10.0]
+    bounds = search_bounds(result)
+    small_keys = [k for k in PARAM_KEYS if bounds[k][1] <= 12.0]
+    large_keys = [k for k in PARAM_KEYS if bounds[k][1] > 12.0]
 
     fig, axes = plt.subplots(2, 2, figsize=(12.5, 7.2), constrained_layout=True)
 
@@ -357,12 +355,13 @@ def build_tables(result: dict, per_id: pd.DataFrame, qdf: pd.DataFrame, out_dir:
     ranges = result.get("near_optimal_ranges") or result["recommended_ranges_from_top_trials"]
     best = result["best_params"]
     robust = result.get("robust_params") or result.get("working_params") or best
+    bounds = search_bounds(result)
 
     param_rows = []
     for key in PARAM_KEYS:
         vals = per_id[key].dropna().to_numpy(dtype=float)
         lo95, med, hi95 = percentile_interval(vals, level=0.95)
-        lo_b, hi_b = PARAM_BOUNDS[key]
+        lo_b, hi_b = bounds[key]
         param_rows.append(
             {
                 "parameter": key,

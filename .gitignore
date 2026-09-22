@@ -68,6 +68,7 @@ Calibration/utility_calibration_pre_split_backup.json
 
 # Paper manuscript (kept local; not published with code)
 Paper Draft/
+Useful_Papers/
 
 # Closed-loop benchmark dumps
 Baselines/results/

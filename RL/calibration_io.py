@@ -43,7 +43,7 @@ __all__ = [
 RL_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "S_theta": (0.05, 12.0),
     "S_v": (0.05, 12.0),
-    "xi_i": (1.0, 10.0),
+    "xi_i": (1.1, 5.0),
     "S_d": (0.05, 12.0),
     "gamma": (0.05, 10.0),
     "w_x": (0.05, 15.0),
@@ -122,12 +122,12 @@ def residual_scales_for_checkpoint(blob: dict[str, Any] | None) -> dict[str, flo
 
 def load_base_params(
     path: Path | None = None,
-    prefer: str = "robust",
+    prefer: str = "working",
 ) -> dict[str, float]:
     """
     Load Theta_base from a calibration JSON.
 
-    prefer: "robust" (default) | "best" | "nominal"
+    prefer: "working" (default) | "robust" | "best" | "nominal"
 
     Older calibration files without sigma_* get vehicle-scale defaults filled in.
     """
@@ -143,7 +143,9 @@ def load_base_params(
     from utility_model import DEFAULT_SIGMA_LAT, DEFAULT_SIGMA_LONG
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if prefer == "best" and "best_params" in payload:
+    if prefer == "working" and "working_params" in payload:
+        params = payload["working_params"]
+    elif prefer == "best" and "best_params" in payload:
         params = payload["best_params"]
     elif "robust_params" in payload:
         params = payload["robust_params"]

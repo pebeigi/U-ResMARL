@@ -188,7 +188,8 @@ class PolicySelection:
             test = {'skipped': True}
         else:
             test = self.evaluate(validation_seeds(self.args, test=True))
-        metadata = dict(selected_update=self.selected_update, validation=self.val_stats,
+        metadata = dict(selected_update=self.selected_update, updates=self.budget.updates,
+            validation=self.val_stats,
             prior_validation=self.prior, validation_history=self.history,
             selection_rule=SELECTION_RULE,
             validation_config=self.validation_config(),

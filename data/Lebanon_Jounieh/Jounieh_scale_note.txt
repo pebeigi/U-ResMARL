@@ -1,4 +1,8 @@
-m_per_px=0.04354578
+﻿m_per_px=0.13063734 (user-selected 3x provisional scale; previously 0.04354578)
+active_boundaries=Jounieh_Road_Boundaries.csv
+active_trajectories=prepared/trajectories_calibration.csv
+raw_trajectories=Final_Jounieh.csv (1x; prepare multiplies by 3)
+raw_curb=_source_1x/Jounieh_Road_Boundaries_extended_1x.csv (1x; scale_jounieh_to_3x multiplies by 3)
 origin=image top-left
 x increases right, y increases down (image coords)
 FPS=29.97028860724333

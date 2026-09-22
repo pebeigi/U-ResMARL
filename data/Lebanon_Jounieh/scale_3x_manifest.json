@@ -1,0 +1,9 @@
+{
+  "source": "_source_1x/Jounieh_Road_Boundaries_extended_1x.csv",
+  "source_sha256": "eb3b11b228e4dabd1056f2e770eb315224bd0152c9f5377b73023516c76da36b",
+  "target": "Jounieh_Road_Boundaries.csv",
+  "target_sha256": "1d6ec3bb5b1ac632c63057698419ce5ed8527b0f93e391b3623903782b8c254a",
+  "coordinate_factor": 3.0,
+  "metres_per_pixel": 0.13063734,
+  "area_factor": 9.0
+}

@@ -8,7 +8,7 @@ import numpy as np
 from shapely.geometry import Point
 from shapely.prepared import prep
 
-from config import STREET_BOUNDARIES, TRAJECTORIES_CSV
+from config import STREET_BOUNDARIES, VEHICLE_LENGTH, VEHICLE_WIDTH
 
 _CALIB = None
 
@@ -27,22 +27,8 @@ def _calib():
 
 
 def tgsim_vehicle_size() -> tuple[float, float]:
-    """Median TGSIM class-3 box when the prepared table exists."""
-    path = Path(TRAJECTORIES_CSV)
-    if not path.is_file():
-        return 4.5, 1.8
-    import pandas as pd
-
-    cols = pd.read_csv(path, nrows=0).columns
-    if "length_smoothed" not in cols or "width_smoothed" not in cols:
-        return 4.5, 1.8
-    use = ["length_smoothed", "width_smoothed"]
-    df = pd.read_csv(path, usecols=use)
-    length = float(np.nanmedian(df["length_smoothed"].to_numpy(float)))
-    width = float(np.nanmedian(df["width_smoothed"].to_numpy(float)))
-    if length >= 2.0 and width >= 1.0:
-        return length, width
-    return 4.5, 1.8
+    """Return the passenger-car box recorded in active calibration metadata."""
+    return VEHICLE_LENGTH, VEHICLE_WIDTH
 
 
 class SiteRoute:

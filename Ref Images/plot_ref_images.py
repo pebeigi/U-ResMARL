@@ -38,7 +38,7 @@ def load_jounieh():
     return load_site_roadway(path)
 
 
-def smooth_roundabout(roadway, radius: float = 0.55, simplify: float = 0.07):
+def smooth_roundabout(roadway, radius: float = 1.65, simplify: float = 0.21):
     """Round extracted vertices for the map only; the RL curb CSV is unchanged.
 
     Closing with a round join keeps the long arms straight, fillets sharp corners,

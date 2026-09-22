@@ -49,7 +49,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
-    parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
+    parser.add_argument("--prefer-params", choices=("working", "robust", "best"), default="working")
     parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/revision5/residual_policy.pt"))
     args = parser.parse_args()
 

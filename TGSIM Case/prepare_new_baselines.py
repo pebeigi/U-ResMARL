@@ -239,11 +239,11 @@ def prepare_tgsim_new_baselines(output_dir: Path, csv_path: Path, cfg, *, train_
 
 
 def generation_config():
-    from network import tgsim_vehicle_size
     from new_baselines.config import Config
-    from config import PERCEPTION_RADIUS
-    length, width = tgsim_vehicle_size()
-    return Config(length=length, width=width, max_speed=25.47096329873556,
+    from config import (MAX_AGENT_SPEED, PERCEPTION_RADIUS, VEHICLE_LENGTH,
+                        VEHICLE_WIDTH, VEHICLE_WHEELBASE)
+    return Config(length=VEHICLE_LENGTH, width=VEHICLE_WIDTH,
+                  wheelbase=VEHICLE_WHEELBASE, max_speed=MAX_AGENT_SPEED,
                   steer_from_rest=True, perception_radius=PERCEPTION_RADIUS).validate()
 
 

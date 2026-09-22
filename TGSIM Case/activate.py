@@ -14,10 +14,14 @@ from config import (
     CHECKPOINT_DIR,
     DESTINATION_THRESHOLD,
     MIN_INITIAL_SPACING,
+    MAX_AGENT_SPEED,
     PERCEPTION_RADIUS,
     REPO_ROOT,
     STREET_BOUNDARIES,
     TRAJECTORIES_CSV,
+    VEHICLE_LENGTH,
+    VEHICLE_WIDTH,
+    VEHICLE_WHEELBASE,
 )
 
 _APPLIED = False
@@ -34,7 +38,7 @@ def apply() -> None:
     if root not in sys.path:
         sys.path.insert(0, root)
 
-    from network import load_site_corridor, road_region_from_site, tgsim_vehicle_size
+    from network import load_site_corridor, road_region_from_site
 
     import RL.calibration_io as calibration_io
     import RL.candidate_policy as candidate_policy
@@ -51,11 +55,11 @@ def apply() -> None:
     from RL.boundary import BoundaryInfeasibleError
 
     site = load_site_corridor(str(STREET_BOUNDARIES))
-    vehicle_length, vehicle_width = tgsim_vehicle_size()
+    vehicle_length, vehicle_width = VEHICLE_LENGTH, VEHICLE_WIDTH
     import hashlib
     from pathlib import Path
     source_paths = [CALIBRATION, STREET_BOUNDARIES, TRAJECTORIES_CSV, *sorted(Path(__file__).parent.glob('*.py'))]
-    site_protocol = dict(version=3, name='tgsim_recorded_initialization', arrival='euclidean_own_goal',
+    site_protocol = dict(version=5, name='tgsim_recorded_initialization', arrival='euclidean_own_goal',
         routing='clearance_visibility_graph', spawn='simultaneous_recorded_poses_with_braking_backup',
         goal='recorded_endpoint_given_as_navigation_intent',
         traffic_split='60_20_20_time_with_cross_partition_tracks_purged',
@@ -106,8 +110,9 @@ def apply() -> None:
         sim["min_steer_speed"] = 0.5
         sim["vehicle_length"] = vehicle_length
         sim["vehicle_width"] = vehicle_width
+        sim["wheelbase"] = VEHICLE_WHEELBASE
         sim["destination_threshold"] = DESTINATION_THRESHOLD
-        sim["max_agent_speed"] = 25.47096329873556
+        sim["max_agent_speed"] = MAX_AGENT_SPEED
         minx, miny, maxx, maxy = site.roadway.bounds
         sim["road_x_min"], sim["road_x_max"] = float(minx), float(maxx)
         sim["road_y_min"], sim["road_y_max"] = float(miny), float(maxy)

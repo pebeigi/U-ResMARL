@@ -124,23 +124,33 @@ class SelectionAndBudgetTests(unittest.TestCase):
 
     def test_strict_benchmark_rejects_legacy_and_mismatched_validation(self):
         from Baselines.benchmark import experiment_manifest
+        from RL.calibration_io import load_base_params
         scenario = build_scenario(0, num_agents=2, max_steps=1)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             args = SimpleNamespace(models=['mappo', 'happo'], train_seeds=None,
                 checkpoint_dir=root, residual_checkpoint=None, pure_rl_checkpoint=None,
-                no_obb_safety_filter=False, require_matched_protocol=True)
+                no_obb_safety_filter=False, require_matched_protocol=True,
+                calibration=None)
+            config = {'num_agents': 2, 'max_steps': 1,
+                      'dynamics': {'vehicle_length': scenario.sim_config['vehicle_length']},
+                      'prior_params': load_base_params()}
             common = dict(selection_rule=SELECTION_RULE, decision_protocol_version=1,
-                          val_seeds=[910000], validation_config={'num_agents': 2})
+                          val_seeds=[910000], validation_config=config)
             torch.save({}, root/'mappo_policy.pt')
             with self.assertRaisesRegex(ValueError, 'legacy'):
                 experiment_manifest(args, [scenario])
             torch.save(common, root/'mappo_policy.pt')
-            torch.save(dict(common, validation_config={'num_agents': 3}), root/'happo_policy.pt')
+            torch.save(dict(common, validation_config=dict(config, num_agents=3)), root/'happo_policy.pt')
             with self.assertRaisesRegex(ValueError, 'different validation conditions'):
                 experiment_manifest(args, [scenario])
             torch.save(common, root/'happo_policy.pt')
             self.assertTrue(all(row['matched_protocol'] for row in experiment_manifest(args, [scenario])['checkpoints']))
+            changed = dict(config, prior_params=dict(config['prior_params'], S_v=config['prior_params']['S_v'] + 0.1))
+            torch.save(dict(common, validation_config=changed), root/'mappo_policy.pt')
+            torch.save(dict(common, validation_config=changed), root/'happo_policy.pt')
+            with self.assertRaisesRegex(ValueError, 'calibration parameters differ'):
+                experiment_manifest(args, [scenario])
 
     def test_all_online_training_clis_honor_exact_interaction_cap(self):
         modules = [('RL.train_ppo', []), ('Baselines.train_direct_discrete_rl', []),

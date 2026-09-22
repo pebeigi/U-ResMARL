@@ -177,7 +177,8 @@ def train(model_name, train_cache, validation_cache, output, cfg, *, steps=10000
 def select_checkpoints(model_name, checkpoints, output, args, *, device='cpu', allow_smoke=False):
     """Same validation scenes, safety rule and PDMS ranking as online learners."""
     from Baselines.training import PolicySelection
-    from RL.experiment_protocol import selection_key, regressions, validation_seeds, SELECTION_RULE, write_json
+    from RL.experiment_protocol import (selection_key, regressions, validation_seeds,
+                                        SELECTION_RULE, write_json, same_site_protocol)
     from .controller import TrafficGenerationController
     evaluator = PolicySelection.__new__(PolicySelection)
     evaluator.args = args
@@ -194,7 +195,7 @@ def select_checkpoints(model_name, checkpoints, output, args, *, device='cpu', a
         payload = torch.load(path, map_location='cpu', weights_only=True)
         if payload.get('decision_protocol_version') != 1:
             raise ValueError('Candidate was trained under an older decision protocol; retrain before matched selection')
-        if payload.get('site_protocol') != expected_site:
+        if not same_site_protocol(payload.get('site_protocol'), expected_site):
             raise ValueError('Candidate site protocol differs from current validation adapter; regenerate data and retrain')
     prior = evaluator.evaluate(seeds, prior=True)
     rows, best_key, selected = [], None, None

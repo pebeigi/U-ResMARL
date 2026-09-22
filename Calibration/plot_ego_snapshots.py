@@ -207,7 +207,7 @@ def plot_snapshots(
     min_disp: float | None = None,
 ) -> Path:
     if view_half is None:
-        view_half = {"freeway": 70.0, "jounieh": 32.0, "tgsim": 45.0}[site]
+        view_half = {"freeway": 70.0, "jounieh": 96.0, "tgsim": 45.0}[site]
     if min_disp is None:
         min_disp = 40.0 if site == "freeway" else 15.0
 
@@ -282,13 +282,20 @@ def plot_snapshots(
                     zorder=2 if is_ego else 1,
                 )
             yaw = heading_at(trail) if len(trail) else 0.0
+            if site == "jounieh":
+                # These source columns are image-axis extents, not the
+                # oriented vehicle footprint used in the simulator.
+                length, width = 4.5, 1.8
+            else:
+                length = float(row["length_smoothed"]) if "length_smoothed" in row.index and pd.notna(row["length_smoothed"]) else 4.5
+                width = float(row["width_smoothed"]) if "width_smoothed" in row.index and pd.notna(row["width_smoothed"]) else 1.8
             draw_vehicle(
                 ax,
                 float(row["xloc_kf"]),
                 float(row["yloc_kf"]),
                 yaw,
-                float(row["length_smoothed"]) if "length_smoothed" in row.index and pd.notna(row["length_smoothed"]) else 4.5,
-                float(row["width_smoothed"]) if "width_smoothed" in row.index and pd.notna(row["width_smoothed"]) else 1.8,
+                length,
+                width,
                 color=color,
                 zorder=4 if is_ego else 3,
             )

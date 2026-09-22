@@ -60,12 +60,12 @@ def apply() -> None:
 
     source_paths = [CALIBRATION, STREET_BOUNDARIES, TRAJECTORIES_CSV, *sorted(Path(__file__).parent.glob("*.py"))]
     site_protocol = dict(
-        version=3,
+        version=4,
         name="roundabout_recorded_initialization",
         arrival="euclidean_own_goal",
         routing="clearance_visibility_graph",
         spawn="simultaneous_recorded_poses_with_braking_backup",
-        coordinate_scale="supplied_0.04354578_m_per_pixel_unverified",
+        coordinate_scale="user_selected_3x_0.13063734_m_per_pixel_provisional",
         goal="recorded_endpoint_given_as_navigation_intent",
         traffic_split="60_20_20_time_with_cross_partition_tracks_purged",
         validation_seed_block=[910000, 920000],

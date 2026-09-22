@@ -39,23 +39,46 @@ from utility_model import (
 )
 
 
-PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+COMMON_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "S_theta": (0.05, 10.0),
     "S_v": (0.05, 10.0),
-    "xi_i": (1.1, 10.0),
-    "S_d": (0.05, 10.0),
+    # The speed utility is maximized at the desired speed only for xi <= 5.
+    "xi_i": (1.1, 5.0),
+    "S_d": (0.05, 12.0),
     "gamma": (0.1, 10.0),
     "w_x": (0.1, 10.0),
     "w_y": (0.1, 10.0),
-    "w_c": (0.01, 1000.0),
-    "w_ell": (0.1, 1000.0),
     "beta": (0.01, 10.0),
-    "sigma_long": (0.5, 5.0),
-    "sigma_lat": (0.3, 2.5),
-    "beta": (0.01, 10.0),
-    "sigma_long": (0.5, 5.0),
-    "sigma_lat": (0.3, 2.5),
 }
+
+# Site ranges cover the previous selected fits and near-optimal clouds while
+# excluding collision/path weights that dwarf every positive utility term.
+# Kernel widths describe clearance beyond the vehicle footprint, so the
+# larger TGSIM cars have a slightly wider admissible kernel than Jounieh.
+SITE_PARAM_BOUNDS: dict[str, dict[str, tuple[float, float]]] = {
+    "highway": {
+        "w_c": (0.01, 800.0), "w_ell": (0.1, 300.0),
+        "sigma_long": (0.5, 5.0), "sigma_lat": (0.3, 2.5),
+    },
+    "tgsim": {
+        "w_c": (0.01, 200.0), "w_ell": (0.1, 300.0),
+        "sigma_long": (0.5, 6.0), "sigma_lat": (0.3, 3.0),
+    },
+    "jounieh": {
+        "w_c": (0.01, 250.0), "w_ell": (0.1, 300.0),
+        "sigma_long": (0.3, 5.0), "sigma_lat": (0.2, 2.5),
+    },
+}
+
+
+def parameter_bounds(site: str) -> dict[str, tuple[float, float]]:
+    if site not in SITE_PARAM_BOUNDS:
+        raise ValueError(f"Unknown calibration site: {site}")
+    return {**COMMON_PARAM_BOUNDS, **SITE_PARAM_BOUNDS[site]}
+
+
+# Backward-compatible highway default for callers that import PARAM_BOUNDS.
+PARAM_BOUNDS = parameter_bounds("highway")
 
 
 @dataclass
@@ -1090,6 +1113,9 @@ def split_rollout_windows(
         "n_windows_test": len(test),
         "horizon_steps": int(horizon_steps),
         "split_by": "vehicle_trajectory",
+        "train_vehicle_keys": [[groups[int(i)][0], groups[int(i)][1]] for i in train_groups],
+        "validation_vehicle_keys": [[groups[int(i)][0], groups[int(i)][1]] for i in val_groups],
+        "test_vehicle_keys": [[groups[int(i)][0], groups[int(i)][1]] for i in test_groups],
     }
     return train, val, test, info
 
@@ -1207,10 +1233,10 @@ def nll(samples: list[ChoiceSample], params: dict[str, float], temperature: floa
     return float(np.mean(losses))
 
 
-def random_params(rng: np.random.Generator) -> dict[str, float]:
+def random_params(rng: np.random.Generator, bounds: dict[str, tuple[float, float]]) -> dict[str, float]:
     return {
         key: float(rng.uniform(low, high))
-        for key, (low, high) in PARAM_BOUNDS.items()
+        for key, (low, high) in bounds.items()
     }
 
 
@@ -1232,7 +1258,7 @@ def screen_params_by_one_step_nll(
     report_every = max(total_trials // 10, 1)
     best_so_far = float("inf")
     for trial_idx in range(total_trials):
-        params = random_params(rng)
+        params = random_params(rng, args.search_bounds)
         one_step_loss = nll(samples, params, args.temperature) if samples else 0.0
         tracking_loss = (
             mean_target_rank(samples, params) / max(args.tracking_rank_normalizer, 1.0)
@@ -2066,6 +2092,17 @@ def infer_default_class_id(traj_csv: Path | None) -> float | None:
     return 1.0
 
 
+def apply_vehicle_overrides(cfg: EnvConfig, args: argparse.Namespace) -> None:
+    for option, key in (("vehicle_length", "vehicle_length"),
+                        ("vehicle_width", "vehicle_width"),
+                        ("wheelbase", "wheelbase")):
+        value = getattr(args, option, None)
+        if value is not None:
+            if not np.isfinite(value) or value <= 0:
+                raise ValueError(f"--{option.replace('_', '-')} must be positive and finite")
+            cfg.sim_config[key] = float(value)
+
+
 def apply_urban_site_config(cfg: EnvConfig, args: argparse.Namespace, ego_df: pd.DataFrame) -> None:
     """Site curb + paper dest utility: U_dir and U_d use each ID's destination."""
     if getattr(args, "site_polygon_csv", None) is None:
@@ -2073,6 +2110,7 @@ def apply_urban_site_config(cfg: EnvConfig, args: argparse.Namespace, ego_df: pd
     roadway = load_site_roadway(getattr(args, "site_polygon_csv", None))
     if roadway is None:
         cfg.sim_config["utility_frame"] = "corridor"
+        apply_vehicle_overrides(cfg, args)
         return
     cfg.sim_config["_site_roadway"] = roadway
     # Same U() algebra as freeway calibration. Freeway U_dir follows the corridor
@@ -2099,28 +2137,23 @@ def apply_urban_site_config(cfg: EnvConfig, args: argparse.Namespace, ego_df: pd
             cfg.sim_config["vehicle_width"] = width
     vmax = getattr(args, "max_agent_speed", None)
     if vmax is None and len(ego_df):
-        if "max_speed" in ego_df.columns:
-            vmax = float(np.nanmax(ego_df["max_speed"].to_numpy(float)))
-        else:
-            vmax = float(np.nanmax(ego_df["speed_kf"].to_numpy(float)))
+        # Urban sites: use speed p99 so a few tracking outliers do not set the
+        # bicycle cap (Jounieh nanmax is ~44 m/s vs p99 ~11–12 m/s).
+        speed = ego_df["speed_kf"].to_numpy(float)
+        speed = speed[np.isfinite(speed)]
+        if len(speed):
+            vmax = float(np.nanpercentile(speed, 99.0))
     if vmax is not None:
         cfg.sim_config["max_agent_speed"] = float(max(vmax, 1.0))
     # Force stop within 2 m of that ID's destination (no utility change).
     cfg.sim_config["destination_threshold"] = 2.0
-    # Denser bicycle set on tight urban sites (freeway stays 7×9 = 63).
-    cfg.sim_config["candidate_accel_grid"] = [
-        -3.5, -2.5, -1.5, -0.75, 0.0, 0.75, 1.5, 2.5, 3.5
-    ]
-    cfg.sim_config["candidate_steering_grid"] = [
-        float(x) for x in np.linspace(-0.50, 0.50, 13)
-    ]
-    n_cand = len(cfg.sim_config["candidate_accel_grid"]) * len(
-        cfg.sim_config["candidate_steering_grid"]
-    )
-    if int(getattr(args, "tracking_rank_normalizer", 63)) == 63:
-        args.tracking_rank_normalizer = n_cand
+    # Keep the executed bicycle candidate grid identical across calibration
+    # and evaluation.
+    # Retain EnvConfig's 7x9 action grid, which is the one used when the
+    # calibrated prior and residual policies execute on these sites.
     # Do not use per-lane PCA lower/upper for these sites.
     args.boundary_csv = None
+    apply_vehicle_overrides(cfg, args)
 
 
 def plot_id_timeseries(
@@ -2547,8 +2580,14 @@ def main() -> None:
         "--max-agent-speed",
         type=float,
         default=None,
-        help="Cap on bicycle speed (m/s). Default 10 on highway; on sites, 1.15× p99 of ego speed.",
+        help="Cap on bicycle speed (m/s). Default 10 on highway; on urban sites, p99 of ego speed_kf.",
     )
+    parser.add_argument("--vehicle-length", type=float, default=None,
+                        help="Override calibration OBB length to match closed-loop evaluation")
+    parser.add_argument("--vehicle-width", type=float, default=None,
+                        help="Override calibration OBB width to match closed-loop evaluation")
+    parser.add_argument("--wheelbase", type=float, default=None,
+                        help="Override calibration bicycle wheelbase to match evaluation")
     parser.add_argument("--no-plots", action="store_true", help="Skip calibration diagnostic plots")
     parser.add_argument(
         "--max-id-plots",
@@ -2587,6 +2626,10 @@ def main() -> None:
     )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
+    site_key = infer_site_key(args.csv)
+    args.search_bounds = parameter_bounds(site_key)
+    if set(args.search_bounds) != set(UTILITY_PARAM_KEYS):
+        raise ValueError("Calibration bounds must cover exactly the utility parameters")
 
     log_progress(f"Loading trajectory data from {args.csv}...", args.verbose)
     if args.class_id is None:
@@ -2617,9 +2660,6 @@ def main() -> None:
                 f"Warning: no run/lane boundaries loaded from {args.boundary_csv}; using nominal-y fallback",
                 flush=True,
             )
-    samples = sample_choices(df, args, cfg.sim_config, boundary_map, scene_df=scene_df)
-    if not samples:
-        raise RuntimeError("No calibration samples built from trajectory data")
     rollout_windows, val_windows, test_windows, split_info = split_rollout_windows(
         df,
         horizon_steps=args.closed_loop_horizon_steps,
@@ -2629,6 +2669,15 @@ def main() -> None:
         n_test=args.closed_loop_test_windows,
         group_fractions=tuple(args.window_split_fractions),
     )
+    # One-step screening is part of fitting, so it must use the same training
+    # vehicle partition as the closed-loop windows. Other vehicles remain in
+    # scene_df as contemporaneous neighbors, never as target choices.
+    train_keys = {tuple(key) for key in split_info.get("train_vehicle_keys", [])}
+    train_mask = df.set_index(["run_id", "id"]).index.isin(train_keys)
+    train_df = df.loc[train_mask]
+    samples = sample_choices(train_df, args, cfg.sim_config, boundary_map, scene_df=scene_df)
+    if not samples:
+        raise RuntimeError("No training-partition calibration samples built from trajectory data")
     grouped_by_time = SceneTimeIndex(scene_df)
     log_progress(
         f"Prepared closed-loop windows (horizon={args.closed_loop_horizon_steps} steps): "
@@ -2651,6 +2700,12 @@ def main() -> None:
     )
     log_progress("Global calibration finished.", args.verbose)
     result["utility_frame"] = cfg.sim_config.get("utility_frame", "corridor")
+    result["calibration_site"] = site_key
+    result["search_bounds"] = {key: list(value) for key, value in args.search_bounds.items()}
+    result["calibration_vehicle"] = {
+        key: float(cfg.sim_config[key]) for key in ("vehicle_length", "vehicle_width", "wheelbase")
+    }
+    result["choice_samples_partition"] = "train_vehicle_keys_only"
     result["max_agent_speed"] = cfg.sim_config.get("max_agent_speed")
     if getattr(args, "site_polygon_csv", None):
         result["site_polygon_csv"] = str(args.site_polygon_csv)

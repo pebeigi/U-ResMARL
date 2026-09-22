@@ -374,7 +374,7 @@ def main() -> None:
     parser.add_argument("--run-id", type=int, default=DEFAULT_RUN_ID)
     parser.add_argument("--lane-kf", type=int, default=DEFAULT_LANE_KF)
     parser.add_argument("--calibration", type=Path, default=DEFAULT_CALIBRATION_PATH)
-    parser.add_argument("--prefer-params", choices=("robust", "best"), default="robust")
+    parser.add_argument("--prefer-params", choices=("working", "robust", "best"), default="working")
     parser.add_argument("--checkpoint", type=Path, default=Path("RL/checkpoints/revision5/residual_policy.pt"))
     parser.add_argument("--no-gif", action="store_true", help="Skip GIF animation export")
     parser.add_argument("--baseline-only", action="store_true", help="Skip residual checkpoint even if present")

@@ -39,16 +39,36 @@ def main():
     from RL.experiment_protocol import source_manifest, write_json
     c.LOG_DIR.mkdir(parents=True, exist_ok=True)
     c.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = dict(protocol='tgsim_recorded_initialization_v3', recipe='paper_2day',
+    manifest = dict(protocol='tgsim_recorded_initialization_v5_calibration_dynamics', recipe='paper_2day',
         created_utc=datetime.now(timezone.utc).isoformat(),
         run_dir=str(run), seeds=c.SEEDS, update_limit=c.TRAIN_UPDATES,
         validation_episodes=c.VAL_EPISODES, validation_every_updates=c.VAL_EVERY,
         test_scenarios=c.BENCH_SCENARIOS, agents=c.NUM_AGENTS, max_steps=c.MAX_STEPS,
-        offline_optimizer_steps=c.NEW_BASELINE_STEPS, source_hashes=source_manifest())
+        offline_optimizer_steps=c.NEW_BASELINE_STEPS,
+        calibration=str(c.CALIBRATION), curb=str(c.STREET_BOUNDARIES),
+        vehicle_length_m=c.VEHICLE_LENGTH, vehicle_width_m=c.VEHICLE_WIDTH,
+        vehicle_wheelbase_m=c.VEHICLE_WHEELBASE, max_agent_speed_mps=c.MAX_AGENT_SPEED,
+        source_hashes=source_manifest(),
+        trajectory_sha256=hashlib.sha256(c.TRAJECTORIES_CSV.read_bytes()).hexdigest())
     path = run/'run_manifest.json'
     if path.exists():
         previous = json.loads(path.read_text())
-        if previous['source_hashes'] != manifest['source_hashes']:
+        for key in ('protocol', 'recipe', 'agents', 'max_steps', 'update_limit'):
+            if previous.get(key) != manifest.get(key):
+                raise ValueError('Run settings changed (%s); use a fresh run directory.' % key)
+        if previous.get('trajectory_sha256') != manifest['trajectory_sha256']:
+            raise ValueError('TGSIM prepared trajectories changed; use a fresh run directory and retrain.')
+        site_inputs = ('Calibration/utility_calibration_tgsim.json',
+                       'data/TGSIM FB/derived_boundaries/street_boundaries.csv')
+        old_hashes = previous.get('source_hashes', {})
+        new_hashes = manifest['source_hashes']
+        changed_site_inputs = [name for name in site_inputs
+                               if old_hashes.get(name) != new_hashes.get(name)]
+        if changed_site_inputs:
+            raise ValueError('TGSIM calibration or curb changed since this run: '
+                             + ', '.join(changed_site_inputs)
+                             + '. Use a fresh run directory and retrain before benchmarking.')
+        if previous['source_hashes'] != manifest['source_hashes'] and not args.resume:
             raise ValueError('Code changed since this run. Use a fresh run directory.')
     else:
         write_json(path, manifest)
@@ -113,7 +133,8 @@ def main():
             for name in c.TRAIN_MODELS:
                 for seed in c.SEEDS:
                     report = json.loads((c.CHECKPOINT_DIR/(STEMS[name]+'_seed'+str(seed)+'.summary.json')).read_text())
-                    if int(report.get('updates', 0)) < c.TRAIN_UPDATES:
+                    completed = int(report.get('updates') or (report.get('budget') or {}).get('policy_updates') or 0)
+                    if completed < c.TRAIN_UPDATES:
                         raise ValueError(name+' seed '+str(seed)+' did not reach the 2-day update budget')
         if args.command in ('newbaselines', 'all'):
             launch('prepare_offline', ['prepare_new_baselines'])

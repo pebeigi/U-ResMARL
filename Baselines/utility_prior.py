@@ -36,7 +36,7 @@ class UtilityPriorController(BaseController):
         self,
         params: dict[str, float] | None = None,
         calibration: Path | None = None,
-        prefer: str = "robust",
+        prefer: str = "working",
         temperature: float = 0.0,
         seed: int = 0,
         name: str = "utility_pt",

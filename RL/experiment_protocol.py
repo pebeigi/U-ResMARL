@@ -9,6 +9,43 @@ import time
 
 SELECTION_RULE = 'common_safety_then_pdms_v1'
 SAFETY_KEYS = ('collision_events', 'collisions', 'offroad_rate')
+# Adapter identity plus recorded geometry/calibration. Python launchers, plots
+# and line-ending noise are not part of the closed-loop protocol.
+_SITE_IDENTITY = ('version', 'name', 'arrival', 'routing', 'spawn', 'goal',
+                  'traffic_split', 'validation_seed_block', 'test_seed_block')
+_SITE_DATA_HASH_TOKENS = ('utility_calibration', 'street_boundaries', 'Road_Boundaries',
+                          'trajectories_calibration')
+
+
+def _jsonable(value):
+    return json.loads(json.dumps(value, default=str))
+
+
+def canonical_site_protocol(protocol):
+    if not protocol:
+        return None
+    payload = _jsonable(protocol)
+    hashes = {}
+    for key, digest in (payload.get('hashes') or {}).items():
+        path = str(key).replace('\\', '/')
+        if any(token in path for token in _SITE_DATA_HASH_TOKENS):
+            hashes[path] = digest
+    identity = {field: payload.get(field) for field in _SITE_IDENTITY}
+    identity['hashes'] = hashes
+    return identity
+
+
+def same_site_protocol(left, right):
+    return canonical_site_protocol(left) == canonical_site_protocol(right)
+
+
+def same_validation_config(left, right):
+    if not left or not right:
+        return left == right
+    left, right = _jsonable(left), _jsonable(right)
+    left['site_protocol'] = canonical_site_protocol(left.get('site_protocol'))
+    right['site_protocol'] = canonical_site_protocol(right.get('site_protocol'))
+    return left == right
 
 
 def regressions(candidate, prior):

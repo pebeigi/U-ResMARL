@@ -1,0 +1,60 @@
+{
+  "status": "aborted",
+  "started_at": 1790090664.5247927,
+  "input_hashes": {
+    "Calibration\\calibrate_utility_from_data.py": "ea03e0c41663a5ad6286f0131a3f0332b237b54d28589fa9609aa1d5a6128528",
+    "data\\Lebanon_Jounieh\\Jounieh_Road_Boundaries.csv": "1d6ec3bb5b1ac632c63057698419ce5ed8527b0f93e391b3623903782b8c254a",
+    "data\\Lebanon_Jounieh\\prepared\\trajectories_calibration.csv": "e97e48aaff471cb5dd991c2063d09b16396da61be9ed6b840689bf0dcbbad51c",
+    "data\\TGSIM FB\\prepared\\trajectories_calibration.csv": "5e19bee70cbff23e33c1a01725f8edd1f727a2e44f0322f0346e69502dded5e4",
+    "data\\Lebanon_Highway\\Final_Lebanon_Data.csv": "c986eac8f9cd98bc646199f9a83d2d3ad2512db805b5d006f2660f73a09c5d0c"
+  },
+  "sites": {
+    "jounieh": {
+      "status": "running",
+      "command": [
+        "C:\\Users\\Pedram\\AppData\\Local\\Programs\\Python\\Python38\\python.exe",
+        "-u",
+        "-m",
+        "Calibration.calibrate_utility_from_data",
+        "--csv",
+        "C:\\Users\\Pedram\\U-ResMARL\\data\\Lebanon_Jounieh\\prepared\\trajectories_calibration.csv",
+        "--output",
+        "C:\\Users\\Pedram\\U-ResMARL\\Calibration\\runs\\recalibration_20260922_3x\\utility_calibration_jounieh.json",
+        "--diagnostics-dir",
+        "C:\\Users\\Pedram\\U-ResMARL\\Calibration\\runs\\recalibration_20260922_3x\\diagnostics_jounieh",
+        "--n-samples",
+        "2000",
+        "--n-trials",
+        "400",
+        "--n-restarts",
+        "3",
+        "--closed-loop-candidates",
+        "80",
+        "--closed-loop-windows",
+        "100",
+        "--closed-loop-val-windows",
+        "40",
+        "--closed-loop-test-windows",
+        "40",
+        "--val-top-k",
+        "10",
+        "--no-plots",
+        "--verbose",
+        "--site-polygon-csv",
+        "data/Lebanon_Jounieh/Jounieh_Road_Boundaries.csv",
+        "--vehicle-length",
+        "4.5",
+        "--vehicle-width",
+        "1.8",
+        "--wheelbase",
+        "2.8",
+        "--max-agent-speed",
+        "44.4397393815629"
+      ],
+      "started_at": 1790090667.4130924,
+      "log": "C:\\Users\\Pedram\\U-ResMARL\\Calibration\\runs\\recalibration_20260922_3x\\jounieh.log"
+    }
+  },
+  "aborted_reason": "vmax nanmax->p99 fix; restarted as recalibration_20260922_p99",
+  "aborted_at": 1790093611.7808123
+}

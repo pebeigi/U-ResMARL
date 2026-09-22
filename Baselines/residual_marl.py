@@ -141,7 +141,7 @@ class ResidualMARLController(BaseController):
         self,
         checkpoint: Path | str | None = DEFAULT_CHECKPOINT,
         calibration: Path | None = None,
-        prefer: str = "robust",
+        prefer: str = "working",
         explore_std: float = 0.0,
         freeze_keys: tuple[str, ...] | list[str] | None = None,
         name: str = "residual_marl",

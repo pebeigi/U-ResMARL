@@ -35,10 +35,16 @@ from data.site_prep import assign_modal_class, attach_desired_speed, origin_dest
 DEFAULT_CSV = _SCRIPT_DIR / "Final_Jounieh.csv"
 DEFAULT_OUT = _SCRIPT_DIR / "prepared"
 TARGET_DT = 0.1
+COORDINATE_SCALE = 3.0
 
 
-def normalize(df: pd.DataFrame, target_dt: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+def normalize(df: pd.DataFrame, target_dt: float, coordinate_scale: float = COORDINATE_SCALE) -> tuple[pd.DataFrame, pd.DataFrame]:
     out = df.copy()
+    if coordinate_scale <= 0:
+        raise ValueError("Coordinate scale must be positive")
+    for column in ("xloc_kf", "yloc_kf", "speed_kf", "acceleration_kf",
+                   "length_smoothed", "width_smoothed"):
+        out[column] = out[column].astype(float) * coordinate_scale
     out["lane_kf_raw"] = out["lane_kf"].astype(str)
     codes = sorted(out["lane_kf_raw"].unique())
     code_map = {c: i + 1 for i, c in enumerate(codes)}
@@ -75,11 +81,13 @@ def main() -> None:
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--target-dt", type=float, default=TARGET_DT)
+    parser.add_argument("--coordinate-scale", type=float, default=COORDINATE_SCALE,
+                        help="Metre-coordinate factor applied to the original Jounieh CSV")
     args = parser.parse_args()
 
     print(f"Loading {args.csv}...")
     raw = pd.read_csv(args.csv)
-    traj, lane_map = normalize(raw, args.target_dt)
+    traj, lane_map = normalize(raw, args.target_dt, args.coordinate_scale)
     n_before = traj.groupby(["run_id", "id"]).ngroups
     traj, report = tag_ego_vehicles(traj)
     traj = attach_desired_speed(traj)

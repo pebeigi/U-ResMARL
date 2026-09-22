@@ -58,6 +58,15 @@ class TGSIMTests(unittest.TestCase):
                 self.assertTrue(has_straight_braking_backup(scene.spawn_agents(), scene.sim_config, scene.corridor))
 
     def test_new_baseline_dynamics_match_site(self):
+        import json
+        from config import (CALIBRATION, MAX_AGENT_SPEED, VEHICLE_LENGTH,
+                            VEHICLE_WIDTH, VEHICLE_WHEELBASE)
+        metadata = json.loads(CALIBRATION.read_text(encoding="utf-8"))
+        vehicle = metadata["calibration_vehicle"]
+        self.assertEqual(MAX_AGENT_SPEED, metadata["max_agent_speed"])
+        self.assertEqual(VEHICLE_LENGTH, vehicle["vehicle_length"])
+        self.assertEqual(VEHICLE_WIDTH, vehicle["vehicle_width"])
+        self.assertEqual(VEHICLE_WHEELBASE, vehicle["wheelbase"])
         from tools.verify_site_learning import check_site_dynamics
         check_site_dynamics()
 

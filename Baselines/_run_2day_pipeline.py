@@ -53,7 +53,6 @@ BENCH_MODELS = [
     "mappo",
     "residual_marl",
     "ctrl_sim",
-    "ctg_plus_plus",
 ]
 
 PARAM_EVAL_MODELS = [

@@ -47,7 +47,8 @@ def preflight_models(models, args, scenario):
 
 
 def experiment_manifest(args, scenarios):
-    from RL.experiment_protocol import SELECTION_RULE, source_manifest
+    from RL.experiment_protocol import SELECTION_RULE, source_manifest, same_site_protocol, same_validation_config
+    from RL.calibration_io import load_base_params
     from Baselines.data_evaluation import file_sha256
     import torch
     records, selection_seeds, selection_config = [], None, None
@@ -70,12 +71,26 @@ def experiment_manifest(args, scenarios):
                 if selection_seeds is not None and selection_seeds != metadata['val_seeds']:
                     raise ValueError('Learned models were selected on different validation scenarios')
                 selection_seeds = metadata['val_seeds']
-                if selection_config is not None and selection_config != metadata['validation_config']:
+                if selection_config is not None and not same_validation_config(selection_config, metadata['validation_config']):
                     raise ValueError('Learned models were selected with different validation conditions')
                 selection_config = metadata['validation_config']
                 expected_site = scenarios[0].sim_config.get('site_protocol')
-                if metadata['validation_config'].get('site_protocol') != expected_site:
+                if not same_site_protocol(metadata['validation_config'].get('site_protocol'), expected_site):
                     raise ValueError(f'{model}: site adapter/calibration differs from checkpoint selection')
+                config = metadata['validation_config']
+                scenario = scenarios[0]
+                if (config.get('num_agents') != scenario.num_agents or
+                        config.get('max_steps') != scenario.max_steps):
+                    raise ValueError(f'{model}: agent count or horizon differs from checkpoint selection')
+                dynamics = config.get('dynamics') or {}
+                if any(scenario.sim_config.get(key) != value for key, value in dynamics.items()):
+                    raise ValueError(f'{model}: vehicle or decision dynamics differ from checkpoint selection')
+                selected_prior = config.get('prior_params') or {}
+                current_prior = load_base_params(args.calibration)
+                if (set(selected_prior) != set(current_prior) or
+                        any(abs(float(current_prior[key]) - float(value)) > 1e-9
+                            for key, value in selected_prior.items())):
+                    raise ValueError(f'{model}: calibration parameters differ from checkpoint selection')
             records.append(dict(model=model, train_seed=train_seed, path=str(checkpoint.resolve()),
                                 sha256=file_sha256(checkpoint), matched_protocol=matched, **metadata))
     return dict(decision_protocol_version=1, args=vars(args) if not getattr(args, 'data_evaluation', False)
