@@ -30,6 +30,7 @@ bootstrap confidence intervals.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -54,6 +55,13 @@ from Baselines.runner import RolloutResult, rollout
 from Baselines.scenario import Scenario, build_scenario
 from Baselines.stats import comparison_frame, summary_frame
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
+
+
+def _rollout_job(payload: tuple[str, dict, Scenario]) -> RolloutResult:
+    """Top-level worker for ProcessPoolExecutor (must be picklable on Windows)."""
+    model, kwargs, scenario = payload
+    controller = build_controller(model, **kwargs)
+    return rollout(scenario, controller)
 
 DEFAULT_OUTPUT = Path("Baselines/results/revision5")
 
@@ -133,6 +141,9 @@ def _run_suite(
     )
 
     preflight_models(models, args, scenarios[0])
+    jobs = max(1, int(getattr(args, "jobs", 1) or 1))
+    if jobs > 1:
+        print(f"Parallel rollouts: {jobs} workers", flush=True)
     results: dict[str, list[RolloutResult]] = {}
     train_seeds: dict[str, list[int]] = {}
     for model in models:
@@ -152,10 +163,23 @@ def _run_suite(
                 checkpoint_override=checkpoint if train_seed >= 0 else None,
                 train_seed=train_seed,
             )
-            controller = build_controller(model, **kwargs)
-            for scenario in scenarios:
-                model_results.append(rollout(scenario, controller))
-                model_train_seeds.append(train_seed)
+            if jobs <= 1:
+                controller = build_controller(model, **kwargs)
+                for scenario in scenarios:
+                    model_results.append(rollout(scenario, controller))
+                    model_train_seeds.append(train_seed)
+            else:
+                payloads = [(model, kwargs, scenario) for scenario in scenarios]
+                ordered: list[RolloutResult | None] = [None] * len(payloads)
+                with ProcessPoolExecutor(max_workers=jobs) as pool:
+                    futures = {
+                        pool.submit(_rollout_job, payload): idx
+                        for idx, payload in enumerate(payloads)
+                    }
+                    for fut in as_completed(futures):
+                        ordered[futures[fut]] = fut.result()
+                model_results.extend(ordered)  # type: ignore[arg-type]
+                model_train_seeds.extend([train_seed] * len(scenarios))
         results[model] = model_results
         train_seeds[model] = model_train_seeds
         collisions = np.mean([r.collision_events for r in model_results])
@@ -164,7 +188,8 @@ def _run_suite(
         seed_note = f" | {n_seeds} train seeds" if n_seeds > 1 else ""
         print(
             f"  {LABELS.get(model, model):<32} collisions={collisions:6.2f} | "
-            f"arrival={arrivals:5.2f}{seed_note}"
+            f"arrival={arrivals:5.2f}{seed_note}",
+            flush=True,
         )
 
     flat = [r for model_results in results.values() for r in model_results]
@@ -306,6 +331,12 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--no-figures", action="store_true")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Parallel scenario rollouts per model/seed (ProcessPool; 4-8 is typical)",
+    )
     args = parser.parse_args()
 
     summaries: dict[str, pd.DataFrame] = {}

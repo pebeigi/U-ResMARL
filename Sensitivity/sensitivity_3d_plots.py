@@ -26,12 +26,12 @@ from Sensitivity._paths import REPO_ROOT
 OUTPUT_DIR = REPO_ROOT / "figures" / "sensitivity" / "3d"
 APPENDIX_DIR = REPO_ROOT / "Paper Draft" / "Appendix"
 
-# Robust highway working point used in the main experiments (theta_rob).
-COLLISION_W_C = 300.0
+# Freeway working point from recalibration_20260922_p99 (best-on-validation).
+COLLISION_W_C = 22.8
 VEHICLE_LENGTH_M = 4.5
 VEHICLE_WIDTH_M = 1.8
-SIGMA_PARALLEL_M = 0.89
-SIGMA_PERP_ROB_M = 0.59
+SIGMA_PARALLEL_M = 0.65
+SIGMA_PERP_ROB_M = 0.58
 
 
 def directional_utility(s_theta: np.ndarray, alignment_cos: np.ndarray) -> np.ndarray:
@@ -241,15 +241,19 @@ def plot_collision_3d(show: bool = False) -> None:
         labels=(r"$|\Delta x|$ (m)", r"$|\Delta y|$ (m)", r"$\sigma_{\perp}$"),
         title=(
             r"Collision Utility Response Surfaces "
-            r"(OBB surface-gap kernel at $\theta_{\mathrm{rob}}$)"
+            r"(OBB surface-gap kernel at freeway working scales)"
         ),
         output_path=output_path,
         cmap="magma",
         show=show,
     )
-    appendix_path = APPENDIX_DIR / "collision_utility_surface_slices.png"
-    appendix_path.parent.mkdir(parents=True, exist_ok=True)
-    appendix_path.write_bytes(output_path.read_bytes())
+    for appendix_dir in (
+        REPO_ROOT / "Paper Draft" / "ICLR" / "Appendix",
+        REPO_ROOT / "Paper Draft" / "Appendix",
+    ):
+        appendix_path = appendix_dir / "collision_utility_surface_slices.png"
+        appendix_path.parent.mkdir(parents=True, exist_ok=True)
+        appendix_path.write_bytes(output_path.read_bytes())
 
 
 def plot_path_3d(show: bool = False) -> None:

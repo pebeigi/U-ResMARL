@@ -39,7 +39,7 @@ def main():
     from RL.experiment_protocol import source_manifest, write_json
     c.LOG_DIR.mkdir(parents=True, exist_ok=True)
     c.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-    manifest = dict(protocol='tgsim_recorded_initialization_v5_calibration_dynamics', recipe='paper_2day',
+    manifest = dict(protocol='tgsim_recorded_initialization_v6_boundary_hold', recipe='paper_2day',
         created_utc=datetime.now(timezone.utc).isoformat(),
         run_dir=str(run), seeds=c.SEEDS, update_limit=c.TRAIN_UPDATES,
         validation_episodes=c.VAL_EPISODES, validation_every_updates=c.VAL_EVERY,

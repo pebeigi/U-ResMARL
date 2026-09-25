@@ -14,6 +14,8 @@ data/TGSIM FB/prepared/trajectories_calibration.csv
 *.tar.gz
 *.rar
 *.7z
+*.tif
+*.tiff
 
 # Python bytecode / caches
 __pycache__/
@@ -48,6 +50,7 @@ ENV/
 
 # Training checkpoints and model weights (large binaries)
 checkpoints/
+**/checkpoints/
 *.pt
 *.pth
 *.pkl
@@ -55,44 +58,56 @@ checkpoints/
 *.onnx
 *.joblib
 
-# Generated figures / media that are often large
-figures/simulation/*.gif
-figures/sensitivity/3d/
-
-# Calibration run artifacts (regenerated locally; keep utility_calibration.json)
-calibration/diagnostics/
-Calibration/diagnostics/
-Calibration/diagnostics_*/
-calibration/diagnostics_*/
-Calibration/utility_calibration_pre_split_backup.json
-
-# Paper manuscript (kept local; not published with code)
+# ---------------------------------------------------------------------------
+# Paper manuscript & reference PDFs (kept local; not published with code)
+# ---------------------------------------------------------------------------
 Paper Draft/
 Useful_Papers/
 
-# Closed-loop benchmark dumps
+# ---------------------------------------------------------------------------
+# Results, runs, logs (regenerated locally)
+# ---------------------------------------------------------------------------
+**/results/
+**/runs/
 Baselines/results/
-
-# Training logs
 RL/logs/
+RL/checkpoints/
 .retired_rl_outputs/
-
-# Isolated site runs (regenerated; keep source in TGSIM Case / Roundabout Case)
+ray_results/
+~/ray_results/
+Calibration/runs/
+Calibration/diagnostics/
+Calibration/diagnostics_*/
+calibration/diagnostics/
+calibration/diagnostics_*/
+Calibration/utility_calibration_pre_split_backup.json
+Calibration/_prior_from_freeway_ckpt.json
+New Baselines/artifacts/
+New Baselines/checkpoints/
 TGSIM Case/runs/
 TGSIM Case/checkpoints/
 TGSIM Case/results/
 TGSIM Case/logs/
 TGSIM Case/artifacts/
 Roundabout Case/runs/
-Roundabout Case/__pycache__/
 
-# New Baselines local dumps
-New Baselines/artifacts/
-New Baselines/checkpoints/
+# ---------------------------------------------------------------------------
+# Plots / figures / paper imagery (regenerated or local-only)
+# ---------------------------------------------------------------------------
+figures/
+**/figures/
+Ref Images/
+Calibration/paper_summary/
+Sensitivity/results/
+data/_qa_plots/
+data/**/figures/
+*.gif
 
-# Ray / RLlib local caches
-ray_results/
-~/ray_results/
+# Generated figures / media that are often large
+figures/simulation/*.gif
+figures/sensitivity/3d/
+
+# Ray / RLlib local caches / test caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/

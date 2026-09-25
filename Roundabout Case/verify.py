@@ -65,6 +65,15 @@ class RoundaboutTests(unittest.TestCase):
                 point, _ = route.xy_from_frenet(s, 0.0)
                 self.assertAlmostEqual(route.project(point)[0], s, places=6)
 
+    def test_goal_distance_handles_points_outside_curb_without_recursion(self):
+        scenario = build_scenario(3, num_agents=1, max_steps=2)
+        agent = scenario.spawn_agents()[0]
+        minx, miny, _, _ = scenario.corridor.roadway.bounds
+        outside = np.array([minx - 0.01, miny - 0.01])
+        distance = scenario.corridor.remaining_to_goal(outside, agent.dest)
+        self.assertTrue(np.isfinite(distance))
+        self.assertGreater(distance, 0.0)
+
     def test_another_agents_goal_cannot_trigger_arrival(self):
         from RL.transition import advance_agents
 

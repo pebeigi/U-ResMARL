@@ -1,6 +1,7 @@
 """Bounded site regressions. Run through run_module.py for isolated activation."""
 import copy
 import unittest
+from unittest.mock import patch
 import numpy as np
 import torch
 from shapely.geometry import LineString
@@ -15,6 +16,36 @@ from Baselines.utility_prior import UtilityPriorController
 
 
 class TGSIMTests(unittest.TestCase):
+    def test_boundary_deadlock_uses_stationary_hold_for_discrete_controllers(self):
+        import Baselines.discrete_action as discrete_action
+        import RL.boundary as boundary
+        import RL.candidate_policy as candidate_policy
+        import utility_model
+
+        scenario = build_scenario(3, num_agents=3, max_steps=2)
+        agents = scenario.spawn_agents()
+        params = load_base_params(CALIBRATION)
+        hold_i = discrete_action.grid_index(0.0, 0.0, scenario.sim_config)
+
+        with patch.object(candidate_policy, "candidate_boundary_safe", return_value=False):
+            context = candidate_policy.candidate_context(
+                0, agents, params, scenario.sim_config
+            )
+        self.assertEqual(np.flatnonzero(context.mask).tolist(), [hold_i])
+        np.testing.assert_array_equal(context.candidates[hold_i]["pos"], agents[0].pos)
+        self.assertEqual(context.candidates[hold_i]["speed"], 0.0)
+
+        with patch.object(boundary, "candidate_boundary_safe", return_value=False):
+            candidate, index, prior = utility_model.select_candidate_with_logit_residual(
+                0, agents[0], agents, params, scenario.sim_config
+            )
+            mask = discrete_action.feasible_action_mask(
+                0, agents[0], agents, scenario
+            )
+        self.assertEqual((index, prior), (hold_i, hold_i))
+        self.assertEqual(np.flatnonzero(mask).tolist(), [hold_i])
+        np.testing.assert_array_equal(candidate["pos"], agents[0].pos)
+
     def test_recorded_sampling_covers_configured_evaluation_seeds(self):
         from config import VAL_EPISODES, TEST_EPISODES, NUM_AGENTS
         seeds = [0, 1, 2, 42] + list(range(910000, 910000 + VAL_EPISODES)) + list(range(810000, 810000 + TEST_EPISODES))

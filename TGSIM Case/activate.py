@@ -59,7 +59,7 @@ def apply() -> None:
     import hashlib
     from pathlib import Path
     source_paths = [CALIBRATION, STREET_BOUNDARIES, TRAJECTORIES_CSV, *sorted(Path(__file__).parent.glob('*.py'))]
-    site_protocol = dict(version=5, name='tgsim_recorded_initialization', arrival='euclidean_own_goal',
+    site_protocol = dict(version=6, name='tgsim_recorded_initialization', arrival='euclidean_own_goal',
         routing='clearance_visibility_graph', spawn='simultaneous_recorded_poses_with_braking_backup',
         goal='recorded_endpoint_given_as_navigation_intent',
         traffic_split='60_20_20_time_with_cross_partition_tracks_purged',
@@ -211,6 +211,82 @@ def apply() -> None:
     utility_model.evaluate_candidate_utility = tgsim_evaluate
     utility_model.directional_alignment_utility = tgsim_dir
     utility_model.distance_reward_utility = tgsim_dist
+
+    # A large TGSIM passenger car can occasionally reach a curb pose from
+    # which none of the one-step grid rollouts is fully contained. Preserve
+    # the atomic boundary contract by holding the state instead of crashing a
+    # training episode. Apply the same fallback to every discrete controller.
+    import Baselines.discrete_action as discrete_action
+
+    def _hold_index(sim):
+        return discrete_action.grid_index(0.0, 0.0, sim)
+
+    def _hold_candidate(agent, sim):
+        stay = utility_model.kinematic_bicycle_rollout(
+            agent.pos, agent.heading, 0.0, 0.0, 0.0, sim["dt"], sim
+        )
+        stay["pos"] = np.asarray(agent.pos, dtype=float)
+        stay["vel"] = np.zeros(2, dtype=float)
+        stay["speed"] = 0.0
+        stay["heading"] = float(agent.heading)
+        stay["accel_longitudinal"] = 0.0
+        stay["steering_angle"] = 0.0
+        return stay
+
+    original_select = utility_model.select_candidate_with_logit_residual
+
+    def select_or_hold(agent_idx, agent, agents, params, sim_config, logit_residual=None):
+        try:
+            return original_select(agent_idx, agent, agents, params, sim_config, logit_residual)
+        except BoundaryInfeasibleError:
+            idx = _hold_index(sim_config)
+            return _hold_candidate(agent, sim_config), idx, idx
+
+    utility_model.select_candidate_with_logit_residual = select_or_hold
+
+    original_context = candidate_policy.candidate_context
+
+    def context_or_hold(index, agents, params, sim):
+        try:
+            return original_context(index, agents, params, sim)
+        except BoundaryInfeasibleError:
+            from RL.candidate_policy import CandidateContext
+            from RL.decision import local_agents
+
+            ego = local_agents(agents, index, sim)[0]
+            n = discrete_action.num_grid_actions(sim)
+            hold_i = _hold_index(sim)
+            mask = np.zeros(n, dtype=bool)
+            mask[hold_i] = True
+            candidates = utility_model.generate_candidate_actions(ego, sim["dt"], sim, dedupe=False)
+            candidates[hold_i] = _hold_candidate(ego, sim)
+            return CandidateContext(candidates, np.zeros(n, dtype=np.float32), mask, hold_i)
+
+    candidate_policy.candidate_context = context_or_hold
+
+    original_mask = discrete_action.feasible_action_mask
+
+    def mask_or_hold(agent_idx, agent, agents, scenario):
+        try:
+            return original_mask(agent_idx, agent, agents, scenario)
+        except BoundaryInfeasibleError:
+            n = discrete_action.num_grid_actions(scenario.sim_config)
+            mask = np.zeros(n, dtype=bool)
+            mask[_hold_index(scenario.sim_config)] = True
+            return mask
+
+    discrete_action.feasible_action_mask = mask_or_hold
+
+    original_filter = boundary.filter_boundary_control
+
+    def filter_or_hold(agent, control, sim, corridor=None):
+        try:
+            return original_filter(agent, control, sim, corridor)
+        except BoundaryInfeasibleError:
+            agent.vel[:] = 0.0
+            return (0.0, 0.0)
+
+    boundary.filter_boundary_control = filter_or_hold
 
     calibration_io.DEFAULT_CALIBRATION_PATH = CALIBRATION
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)

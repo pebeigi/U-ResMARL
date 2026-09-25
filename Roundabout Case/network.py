@@ -187,16 +187,26 @@ class SiteNetworkCorridor:
         from shapely.geometry import LineString
         from shapely.ops import nearest_points
 
-        if not self.roadway.covers(Point(*np.asarray(point, float))):
+        point = np.asarray(point, float)
+        dest = np.asarray(dest, float)
+        # Recorded trajectories and inverse bicycle rollouts can land a few
+        # floating-point ulps outside the curb polygon.  Project once and use
+        # the same tiny visibility tolerance as the routing graph.  Recursing
+        # from an exact boundary projection is unsafe because GEOS can still
+        # classify that projected coordinate as exterior on the next call.
+        routing_region = self.roadway.buffer(1e-7)
+        offroad_distance = 0.0
+        if not routing_region.covers(Point(*point)):
             nearest = np.asarray(nearest_points(Point(*point), self.roadway)[1].coords[0])
-            return float(np.linalg.norm(np.asarray(point) - nearest)) + self.remaining_to_goal(nearest, dest)
-        if self.roadway.covers(LineString([point, dest])):
-            return float(np.linalg.norm(np.asarray(point) - dest))
+            offroad_distance = float(np.linalg.norm(point - nearest))
+            point = nearest
+        if routing_region.covers(LineString([point, dest])):
+            return offroad_distance + float(np.linalg.norm(point - dest))
         distances, _ = self._goal_distances(dest)
-        result = float(np.min(self._connections(point) + distances))
+        result = float(np.min(self._connections(point, routing_region) + distances))
         if not np.isfinite(result):
             raise ValueError("Point or goal is not connected through the roadway")
-        return result
+        return offroad_distance + result
 
     def route_points(self, start, dest):
         from shapely.geometry import LineString
