@@ -41,7 +41,7 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the direct discrete RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/revision5/direct_discrete_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/direct_discrete_policy.pt")
 
 
 from RL.value_normalization import ValueNormalizer
@@ -139,7 +139,7 @@ def load_direct_discrete_policy(checkpoint: Path, obs_dim: int, num_actions: int
     )
     policy.load_state_dict(blob["state_dict"])
     policy.eval()
-    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.selection_status = blob.get("selection_status", "unverified")
     policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 

@@ -35,7 +35,7 @@ except ImportError as exc:  # pragma: no cover
         "PyTorch is required for the pure-RL baseline. Install with: pip install torch"
     ) from exc
 
-DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/revision5/pure_rl_policy.pt")
+DEFAULT_CHECKPOINT = Path("Baselines/checkpoints/pure_rl_policy.pt")
 ACTION_DIM = 2
 
 
@@ -126,7 +126,7 @@ def load_pure_rl_policy(checkpoint: Path, obs_dim: int) -> PureRLPolicy:
             f"Retrain it with: python -m Baselines.train_pure_rl --save {checkpoint}"
         ) from exc
     policy.eval()
-    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.selection_status = blob.get("selection_status", "unverified")
     policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 

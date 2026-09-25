@@ -46,9 +46,9 @@ ALGORITHMS = ("ippo", "mappo", "happo", "hatrpo")
 SEQUENTIAL_ALGORITHMS = ("happo", "hatrpo")
 
 DEFAULT_CHECKPOINTS = {
-    "mappo": Path("Baselines/checkpoints/revision5/mappo_policy.pt"),
-    "happo": Path("Baselines/checkpoints/revision5/happo_policy.pt"),
-    "hatrpo": Path("Baselines/checkpoints/revision5/hatrpo_policy.pt"),
+    "mappo": Path("Baselines/checkpoints/mappo_policy.pt"),
+    "happo": Path("Baselines/checkpoints/happo_policy.pt"),
+    "hatrpo": Path("Baselines/checkpoints/hatrpo_policy.pt"),
 }
 
 
@@ -219,7 +219,7 @@ def load_marl_policy(checkpoint: Path, obs_dim: int) -> MARLPolicy:
             f"python -m Baselines.train_marl --algo {blob.get('algo', 'mappo')}"
         ) from exc
     policy.eval()
-    policy.selection_status = blob.get("selection_status", "legacy_unverified")
+    policy.selection_status = blob.get("selection_status", "unverified")
     policy.training_revision = blob.get("decision_protocol_version", 0)
     return policy
 

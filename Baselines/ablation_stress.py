@@ -63,7 +63,7 @@ def _rollout_job(payload: tuple[str, dict, Scenario]) -> RolloutResult:
     controller = build_controller(model, **kwargs)
     return rollout(scenario, controller)
 
-DEFAULT_OUTPUT = Path("Baselines/results/revision5")
+DEFAULT_OUTPUT = Path("Baselines/results")
 
 STRESS_SPAWN = {
     "spawn_s_range": (20.0, 80.0),
@@ -72,8 +72,8 @@ STRESS_SPAWN = {
 }
 
 _COLLPEN_CHECKPOINTS = {
-    "residual_collpen": Path("RL/checkpoints/revision5/residual_collpen_policy.pt"),
-    "residual_collpen_dense": Path("RL/checkpoints/revision5/residual_collpen_dense_policy.pt"),
+    "residual_collpen": Path("RL/checkpoints/residual_collpen_policy.pt"),
+    "residual_collpen_dense": Path("RL/checkpoints/residual_collpen_dense_policy.pt"),
 }
 
 STATS_METRICS = (

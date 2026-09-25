@@ -1,11 +1,7 @@
-"""Paper-facing figures from existing rollouts / fresh stress comparisons.
+"""Build paper figures from benchmark CSV / rollouts.
 
-    # Regenerate metric bars (with realism) + realism distributions from benchmark_raw
     python -m Baselines.paper_figures --metrics --realism-panel
-
-    # Qualitative Frenet: prior vs residual vs MAPPO on one dense stress scenario
     python -m Baselines.paper_figures --stress-frenet
-
     python -m Baselines.paper_figures --all
 """
 
@@ -35,8 +31,8 @@ from Baselines.runner import rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/revision5/paper")
-BENCHMARK_RAW = Path("Baselines/results/revision5/benchmark_raw.csv")
+DEFAULT_OUTPUT = Path("Baselines/results/paper")
+BENCHMARK_RAW = Path("Baselines/results/benchmark_raw.csv")
 
 # Clean main-table models for the paper figure (no reward-exploit / unstable MARL).
 PAPER_MODELS = [

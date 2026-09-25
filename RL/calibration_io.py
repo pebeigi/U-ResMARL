@@ -22,7 +22,7 @@ from RL.param_gauge import (
 
 DEFAULT_CALIBRATION_PATH = REPO_ROOT / "Calibration" / "utility_calibration.json"
 
-# Re-export for callers that imported from here historically.
+# Re-export gauge helpers for residual loaders.
 __all__ = [
     "AMPLITUDE_LOGIT_KEYS",
     "DEFAULT_CALIBRATION_PATH",

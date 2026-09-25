@@ -122,7 +122,7 @@ class SelectionAndBudgetTests(unittest.TestCase):
         self.assertEqual(resumed.remaining(2), 0)
         self.assertEqual(resumed.state()['active_agent_transitions'], 9)
 
-    def test_strict_benchmark_rejects_legacy_and_mismatched_validation(self):
+    def test_strict_benchmark_rejects_mismatched_validation(self):
         from Baselines.benchmark import experiment_manifest
         from RL.calibration_io import load_base_params
         scenario = build_scenario(0, num_agents=2, max_steps=1)
@@ -138,7 +138,7 @@ class SelectionAndBudgetTests(unittest.TestCase):
             common = dict(selection_rule=SELECTION_RULE, decision_protocol_version=1,
                           val_seeds=[910000], validation_config=config)
             torch.save({}, root/'mappo_policy.pt')
-            with self.assertRaisesRegex(ValueError, 'legacy'):
+            with self.assertRaisesRegex(ValueError, 'selection protocol'):
                 experiment_manifest(args, [scenario])
             torch.save(common, root/'mappo_policy.pt')
             torch.save(dict(common, validation_config=dict(config, num_agents=3)), root/'happo_policy.pt')

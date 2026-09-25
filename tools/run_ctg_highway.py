@@ -131,7 +131,7 @@ def main() -> None:
                 for future in as_completed(futures):
                     future.result()
 
-        benchmark_output = ROOT / "Baselines" / "results" / "revision6" / "paper_2day" / "ctg_plus_plus_only_current_calibration"
+        benchmark_output = ROOT / "Baselines" / "results" / "paper_2day" / "ctg_plus_plus_only_current_calibration"
         # Benchmark is a module rather than a New Baselines CLI command.
         timeout = remaining()
         if timeout <= 0:

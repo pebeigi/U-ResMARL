@@ -1,10 +1,8 @@
 #!/usr/bin/env python
-"""Train residual utility policy with custom shared-policy PPO (primary trainer).
+"""Train the residual utility policy with shared-policy PPO.
 
-Run from repo root:
+Run from the repo root:
   python -m RL.train_ppo --calibration Calibration/utility_calibration.json
-
-See RL/METHOD_NOTES.md for the supported training and evaluation workflow.
 """
 
 from __future__ import annotations
@@ -39,11 +37,7 @@ except ImportError as exc:
 
 
 def normalize_obs(obs: torch.Tensor, highway_length: float = 500.0) -> torch.Tensor:
-    """Scale Frenet / body-frame features into a PPO-friendly range.
-
-    Supports both the legacy 7-ego layout and the current 8-ego layout (with
-    remaining station).
-    """
+    """Scale Frenet / body-frame features for the actor-critic."""
     from RL.obs import ego_feature_count
 
     obs = obs.clone()
@@ -70,23 +64,16 @@ def normalize_obs(obs: torch.Tensor, highway_length: float = 500.0) -> torch.Ten
     return obs
 
 
-#: Action-space variants, recorded in the checkpoint so older policies replay
-#: exactly as they were trained.
-#:   ``legacy``          -- Gaussian directly in physical Delta units, clipped by
-#:                          the environment but scored unclipped.
-#:   ``normalized_tanh`` -- Gaussian in [-1, 1]^d, sample clipped then scored.
-#:   ``squashed_tanh``   -- Gaussian in R^d squashed by tanh into [-1, 1]^d with
-#:                          the change-of-variables correction (parameter ablation).
-#:   ``categorical_utility`` -- masked categorical distribution on utility + residual.
+# Action-space tags stored in checkpoints so policies replay as trained.
+# legacy / normalized_tanh / squashed_tanh: continuous residual on parameters.
+# categorical_utility: masked categorical over utility + residual scores.
 LEGACY_ACTION_SPACE = "legacy"
 NORMALIZED_ACTION_SPACE = "normalized_tanh"
 SQUASHED_ACTION_SPACE = "squashed_tanh"
 DEFAULT_ACTION_SPACE = SQUASHED_ACTION_SPACE
 CATEGORICAL_ACTION_SPACE = "categorical_utility"
 
-#: Residual interfaces.
-#:   ``candidate_logits`` -- additive residual on the discrete utility grid (default).
-#:   ``param_delta``      -- residual on utility parameters Θ (ablation / legacy).
+# Residual interfaces: candidate logits (default) or parameter delta (ablation).
 RESIDUAL_MODE_CANDIDATE = "candidate_logits"
 RESIDUAL_MODE_PARAM = "param_delta"
 DEFAULT_RESIDUAL_MODE = RESIDUAL_MODE_CANDIDATE
@@ -110,13 +97,11 @@ from RL.value_normalization import ValueNormalizer
 
 
 class TorchResidualPolicy(ValueNormalizer):
-    """Shared actor-critic with categorical utility or legacy Gaussian sampling.
+    """Shared actor-critic for candidate-logit or continuous parameter residuals.
 
-    Default residual interface (``candidate_logits``): the actor emits an additive
-    residual over the discrete utility grid. Categorical training scores the
-    chosen grid index under softmax(U + residual), retaining the rollout mask.
-    Legacy Gaussian training scores a 63-dimensional noise vector before argmax.
-    Deterministic evaluation maximizes U + residual in both cases.
+    Default (``candidate_logits``): additive residual on the discrete utility grid;
+    training samples softmax(U + residual), eval takes argmax. Continuous modes
+    score a Gaussian residual on utility parameters instead.
     """
 
     def __init__(
@@ -1409,7 +1394,7 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("RL/checkpoints/revision5/residual_policy.pt"),
+        default=Path("RL/checkpoints/residual_policy.pt"),
     )
     parser.add_argument(
         "--collision-penalty",

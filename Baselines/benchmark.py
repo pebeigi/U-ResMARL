@@ -27,7 +27,7 @@ from Baselines.runner import RolloutResult, rollout
 from Baselines.scenario import build_scenario
 from RL.corridor import DEFAULT_LANE_KF, DEFAULT_RUN_ID
 
-DEFAULT_OUTPUT = Path("Baselines/results/revision5")
+DEFAULT_OUTPUT = Path("Baselines/results")
 
 
 def preflight_models(models, args, scenario):
@@ -63,7 +63,7 @@ def experiment_manifest(args, scenarios):
             matched = metadata['selection_rule'] == SELECTION_RULE and metadata['decision_protocol_version'] == 1
             if getattr(args, 'require_matched_protocol', False):
                 if not matched:
-                    raise ValueError(f'{model}: legacy/unmatched checkpoint; retrain or select under the common protocol')
+                    raise ValueError(f'{model}: checkpoint selection protocol does not match; retrain or re-select under the common rule')
                 if not metadata['val_seeds']:
                     raise ValueError(f'{model}: missing validation seed manifest')
                 if not metadata['validation_config']:
@@ -368,7 +368,7 @@ def main() -> None:
     parser.add_argument("--data-horizons", nargs="+", type=float, default=[1., 3., 5.])
     parser.add_argument("--no-figures", action="store_true")
     parser.add_argument("--require-matched-protocol", action="store_true",
-                        help="Reject legacy checkpoint selection/decision protocols and mismatched validation seeds")
+                        help="Require matching checkpoint selection/decision metadata and validation seeds")
     parser.add_argument("--conflict-lookahead", choices=['full', 'endpoint'], default='full',
                         help="Common candidate/execution OBB horizon; native planner trajectory horizons remain intact")
     args = parser.parse_args()

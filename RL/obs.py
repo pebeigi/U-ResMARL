@@ -40,12 +40,7 @@ def ego_feature_count(obs_dim: int) -> int:
 
 
 def adapt_observation(obs: np.ndarray, target_dim: int) -> np.ndarray:
-    """Map between the legacy 7-ego and current 8-ego observation layouts.
-
-    Checkpoints trained before remaining-station was added expect ``7 + 4K``
-    features.  Drop / insert the remaining-station slot at index 7 so old
-    direct-discrete / MAPPO / pure-RL policies keep working under the new env.
-    """
+    """Pad or drop the remaining-station ego feature to match a policy's obs size."""
     arr = np.asarray(obs, dtype=np.float32)
     target = int(target_dim)
     if arr.shape[-1] == target:

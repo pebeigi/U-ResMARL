@@ -24,7 +24,7 @@ from utility_model import (
 if TYPE_CHECKING:  # pragma: no cover
     from Baselines.scenario import Scenario
 
-DEFAULT_CHECKPOINT = Path("RL/checkpoints/revision5/residual_policy.pt")
+DEFAULT_CHECKPOINT = Path("RL/checkpoints/residual_policy.pt")
 
 
 def build_random_residual_policy(

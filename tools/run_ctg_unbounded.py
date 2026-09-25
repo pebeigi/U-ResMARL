@@ -42,7 +42,7 @@ SITES = {
         "max_steps": 240,
         "run_id": 2,
         "lane_kf": 1,
-        "result": ROOT / "Baselines" / "results" / "revision6" / "paper_2day"
+        "result": ROOT / "Baselines" / "results" / "paper_2day"
                   / "ctg_plus_plus_only_fast20",
     },
     "tgsim": {

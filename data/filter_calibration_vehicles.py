@@ -143,7 +143,7 @@ def main() -> None:
     parser.add_argument(
         "--drop-non-ego",
         action="store_true",
-        help="Remove scene-only IDs from the CSV (legacy). Default keeps them as neighbors.",
+        help="Remove scene-only IDs from the CSV. Default keeps them as neighbors.",
     )
     args = parser.parse_args()
     for path in args.traj_csv:

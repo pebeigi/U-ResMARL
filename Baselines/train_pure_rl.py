@@ -202,7 +202,7 @@ def main() -> None:
     parser.add_argument("--collision-event-penalty", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--log-every", type=int, default=5)
-    parser.add_argument("--save", type=Path, default=Path("Baselines/checkpoints/revision5/pure_rl_policy.pt"))
+    parser.add_argument("--save", type=Path, default=Path("Baselines/checkpoints/pure_rl_policy.pt"))
     add_validation_args(parser)
     parser.add_argument("--train-obb-filter", action="store_true", default=True)
     parser.add_argument("--no-train-obb-filter", dest="train_obb_filter", action="store_false")

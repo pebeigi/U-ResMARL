@@ -61,7 +61,7 @@ PARAM_BOUNDS = {
 
 
 def search_bounds(result: dict) -> dict[str, tuple[float, float]]:
-    """New fits carry their actual site bounds; old archives used this legacy box."""
+    """Default search bounds when a fit does not store its own."""
     return {key: tuple(value) for key, value in result.get("search_bounds", PARAM_BOUNDS).items()}
 
 

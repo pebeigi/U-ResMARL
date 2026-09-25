@@ -1,17 +1,8 @@
-"""Gauge-fixed utility parameterization for residual MARL.
+"""Logit-simplex gauge for utility amplitude weights used by residual MARL.
 
-Amplitude weights (S_theta, S_v, S_d, w_c, w_ell) are represented as a simplex
-times a fixed scale W derived from the calibrated prior:
-
-    amplitude_k = W * softmax(z)_k
-
-The residual policy perturbs logits z (relative preferences) and additively
-adjusts shape coordinates (xi_i, gamma, sigma_long, sigma_lat).  Argmax over
-candidates is invariant to W>0; W is fixed from Theta_base so absolute magnitudes
-stay comparable to calibration.
-
-Legacy checkpoints that output additive deltas on (S_v, S_theta, ...) are still
-supported via apply_residual(..., legacy=True) or automatic key detection.
+Amplitude weights are W * softmax(z) with W fixed from the calibrated prior.
+The residual edits logits z and the shape coordinates; absolute scale stays
+tied to calibration. Older additive-delta checkpoints still load when needed.
 """
 
 from __future__ import annotations

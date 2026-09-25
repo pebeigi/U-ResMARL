@@ -23,10 +23,10 @@ from pathlib import Path
 import Baselines._paths  # noqa: F401
 from Baselines._paths import REPO_ROOT
 
-LOG_DIR = Path("RL/logs/revision6/new_baselines")
+LOG_DIR = Path("RL/logs/new_baselines")
 PIPELINE_LOG = LOG_DIR / "pipeline.log"
 CKPT_DIR = Path("New Baselines/checkpoints")
-BENCH_OUT = Path("Baselines/results/revision6/new_baselines")
+BENCH_OUT = Path("Baselines/results/new_baselines")
 TRAIN_SCRIPT = Path("New Baselines/run.py")
 MODELS = ("ctrl_sim", "ctg_plus_plus")
 

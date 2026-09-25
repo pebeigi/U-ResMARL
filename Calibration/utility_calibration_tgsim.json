@@ -7179,7 +7179,7 @@
   },
   "choice_samples_partition": "train_vehicle_keys_only",
   "max_agent_speed": 14.50957949863994,
-  "site_polygon_csv": "C:\\Users\\Pedram\\U-ResMARL\\data\\TGSIM FB\\derived_boundaries\\street_boundaries.csv",
+  "site_polygon_csv": "data/TGSIM FB/derived_boundaries/street_boundaries.csv",
   "boundary_summary_pca": {
     "run_1_lane_1": {
       "run_id": 1,

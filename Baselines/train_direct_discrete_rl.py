@@ -215,7 +215,7 @@ def main() -> None:
     parser.add_argument(
         "--save",
         type=Path,
-        default=Path("Baselines/checkpoints/revision5/direct_discrete_policy.pt"),
+        default=Path("Baselines/checkpoints/direct_discrete_policy.pt"),
     )
     parser.add_argument("--target-kl", type=float, default=0.02)
     parser.add_argument("--no-anneal-lr", dest="anneal_lr", action="store_false")

@@ -664,7 +664,7 @@ def main() -> None:
     parser.add_argument("--no-train-obb-filter", dest="train_obb_filter", action="store_false")
     args = parser.parse_args()
     if args.save is None:
-        args.save = Path(f"Baselines/checkpoints/revision5/{args.algo}_policy.pt")
+        args.save = Path(f"Baselines/checkpoints/{args.algo}_policy.pt")
     args.max_kl = torch.tensor(float(args.max_kl))
     train(args)
 

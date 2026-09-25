@@ -237,9 +237,8 @@ def build_recorded_scenes(csv_path: Path, *, count: int, seed: int, run_id: int,
                             for name in intervals},
         "purged_cross_partition_track_ids": sorted(set(tracks) - set(membership)),
         "holdout_status": "retrospective_partition_prior_exposure_unverified",
-        "holdout_note": "Disjoint data partitions do not establish independence from existing "
-                        "calibration or policy fitting. Historical calibration sampled one-step "
-                        "choices before splitting rollout windows and saved no exposure IDs.",
+        "holdout_note": "Disjoint data partitions do not by themselves prove independence "
+                        "from prior calibration or policy fitting on the same recording.",
         "initialization": "observed position and backward velocity from history only",
         "goal": "fixed corridor exit, 5 m before end; no observed future endpoints",
         "desired_speed_mps": base_desired_speed,

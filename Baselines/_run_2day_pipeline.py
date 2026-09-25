@@ -20,9 +20,9 @@ import Baselines._paths  # noqa: F401
 from Baselines._paths import REPO_ROOT
 
 SEEDS = [0, 1, 2]
-LOG_DIR = Path("RL/logs/revision6/paper_2day")
+LOG_DIR = Path("RL/logs/paper_2day")
 PIPELINE_LOG = LOG_DIR / "pipeline.log"
-BENCH_OUT = Path("Baselines/results/revision6/paper_2day")
+BENCH_OUT = Path("Baselines/results/paper_2day")
 
 # Matched paper recipe under the shared decision/OBB/selection protocol.
 TRAIN_FWD = [
@@ -64,8 +64,8 @@ PARAM_EVAL_MODELS = [
     "direct_discrete_rl",
     "mappo",
 ]
-PARAM_OUT = Path("Baselines/results/revision6/param_lookahead_stress")
-GATE_OUT = Path("Baselines/results/revision6/gate_ablation")
+PARAM_OUT = Path("Baselines/results/param_lookahead_stress")
+GATE_OUT = Path("Baselines/results/gate_ablation")
 
 
 def log(msg: str) -> None:

@@ -111,3 +111,15 @@ figures/sensitivity/3d/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local tooling / binaries / notebooks (not part of the paper code release)
+*.exe
+tools/tectonic/
+*.ipynb
+runs/
+Screenshot*
+New Baselines/upstream/
+
+# Absolute-path scratch / local-only
+**/_tmp_*.py
+**/__pycache__/

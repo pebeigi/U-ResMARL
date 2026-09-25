@@ -683,9 +683,8 @@ def generate_candidate_actions(
 ) -> list[dict[str, Any]]:
     """Discrete acceleration/steering candidates via kinematic bicycle rollout.
 
-    When ``dedupe`` is False the full accel×steer grid is returned in a fixed
-    order (required for candidate-logit residuals).  Calibration / legacy callers
-    keep the historical deduplicated list.
+    With ``dedupe=False`` the full accel×steer grid is kept in fixed order
+    (needed for candidate-logit residuals). Calibration may dedupe identical poses.
     """
     sim_config = dict(sim_config)
     agent_vmax = getattr(agent, "max_speed", None)

@@ -20,9 +20,9 @@ import Baselines._paths  # noqa: F401
 from Baselines._paths import REPO_ROOT
 
 SEEDS = [0, 1, 2]
-LOG_DIR = Path("RL/logs/revision6/param_stress")
+LOG_DIR = Path("RL/logs/param_stress")
 PIPELINE_LOG = LOG_DIR / "pipeline.log"
-BENCH_OUT = Path("Baselines/results/revision6/param_lookahead_stress")
+BENCH_OUT = Path("Baselines/results/param_lookahead_stress")
 
 TRAIN_FWD = [
     "--updates", "24",

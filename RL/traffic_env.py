@@ -71,8 +71,8 @@ class EnvConfig:
     behavior_csv: str | None = None
     sim_config: dict[str, Any] | None = None
     base_params: dict[str, float] | None = None
-    # ``candidate_logits``: residual adds to discrete utilities before argmax.
-    # ``param_delta``: residual edits Θ (legacy / ablation).
+    # candidate_logits: add to discrete utilities before argmax.
+    # param_delta: edit utility parameters (ablation).
     residual_mode: str = "candidate_logits"
     # Terms that align the dense reward with leftover-distance / arrival metrics.
     leftover_coef: float = 0.08

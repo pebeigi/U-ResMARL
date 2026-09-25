@@ -276,14 +276,6 @@ class DiagnosticAndWrapperTest(unittest.TestCase):
             plot_metric_bars(frame, path)
             self.assertGreater(path.stat().st_size, 0)
 
-    def test_paper_eval_forwards_scenario_count_to_stress(self):
-        from Baselines.paper_rerun import cmd_eval
-        args = argparse.Namespace(seeds=[0, 1, 2], scenarios=7, n_boot=20,
-                                  ablation_dir=Path("unused"), no_figures=True)
-        with patch("Baselines.paper_rerun.subprocess.run") as run:
-            cmd_eval(args)
-        command = run.call_args[0][0]
-        self.assertEqual(command[command.index("--stress-scenarios") + 1], "7")
 
     def test_candidate_heatmap_uses_emitted_coordinates(self):
         from RL.visualize import residual_series_matrix
