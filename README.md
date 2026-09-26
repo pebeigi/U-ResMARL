@@ -1,6 +1,6 @@
 # U-ResMARL (anonymous code)
 
-Anonymous code for the ICLR submission on utility-guided residual multi-agent RL for closed-loop interactive motion generation.
+Anonymous code for the ICLR submission on UTILITY-GUIDED RESIDUAL MULTI-AGENT REINFORCEMENT LEARNING FOR CLOSED-LOOP INTERACTIVE DRIVING.
 
 ## Layout
 
